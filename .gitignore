@@ -1,0 +1,37 @@
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+test.db
+*.db
+
+# Node / frontend
+node_modules/
+.vite/
+tsconfig.tsbuildinfo
+dist/
+
+# Docker runtime data
+docker-workspace/
+
+# Uploaded files
+uploads/
+
+# macOS
+.DS_Store
+
+# IDE user-specific state
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/usage.statistics.xml
+.idea/shelf/
+
+# Misc
+picture/
+skills-lock.json

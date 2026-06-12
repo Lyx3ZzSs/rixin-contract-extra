@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:15.4
+    environment:
+      POSTGRES_DB: contract_extract
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: sprixin2026
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./docker-workspace/pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
