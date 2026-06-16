@@ -2828,10 +2828,9 @@ h2 {
 .field-library-panel {
   display: grid;
   width: min(1180px, 100%);
-  gap: 16px;
-  min-height: calc(100vh - 150px);
+  gap: 12px;
   margin: 0 auto;
-  padding: 18px;
+  padding: 14px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #ffffff;
@@ -2920,7 +2919,7 @@ h2 {
 .field-library-row {
   display: grid;
   min-height: 62px;
-  grid-template-columns: minmax(150px, 1fr) minmax(220px, 1.55fr) 96px 150px;
+  grid-template-columns: var(--field-lib-cols, minmax(150px, 1fr) minmax(220px, 1fr) 88px 150px);
   gap: 12px;
   align-items: center;
   padding: 12px 14px;
@@ -2985,16 +2984,17 @@ h2 {
 
 .field-library-editor {
   display: grid;
-  grid-template-columns: minmax(140px, 0.85fr) minmax(180px, 1fr) minmax(240px, 1.45fr) auto;
+  grid-template-columns: var(--field-lib-cols, minmax(150px, 1fr) minmax(220px, 1fr) 88px 150px);
   gap: 12px;
-  align-items: end;
+  align-items: center;
   padding: 14px;
   border: 1px solid rgba(73, 170, 160, 0.34);
   border-radius: 8px;
   background: #f5fbfa;
 }
 
-.field-library-editor > strong {
+.field-library-editor-title {
+  grid-column: 1 / -1;
   align-self: center;
   color: #142426;
   font-size: 0.9rem;
@@ -4245,13 +4245,13 @@ h2 {
     grid-template-columns: minmax(180px, 1fr) minmax(126px, 0.8fr) minmax(94px, 0.7fr) 54px minmax(106px, 0.7fr) minmax(158px, auto);
   }
 
-  .field-library-toolbar,
-  .field-library-editor {
+  .field-library-toolbar {
     grid-template-columns: 1fr 1fr;
   }
 
-  .field-library-row {
-    grid-template-columns: minmax(130px, 1fr) minmax(180px, 1fr) 90px 132px;
+  .field-library-row,
+  .field-library-editor {
+    --field-lib-cols: minmax(130px, 1fr) minmax(180px, 1fr) 84px 140px;
   }
 }
 
@@ -4423,7 +4423,6 @@ h2 {
   }
 
   .field-library-panel {
-    min-height: auto;
     padding: 10px;
   }
 

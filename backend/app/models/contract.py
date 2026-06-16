@@ -1,4 +1,4 @@
-"""Contract, ContractFile, ExtractedField, ContractClause, ContractRisk models."""
+"""Contract, ContractFile, ExtractedField, and ContractClause models."""
 
 import uuid
 from datetime import datetime
@@ -42,9 +42,6 @@ class Contract(Base):
         back_populates="contract", cascade="all, delete-orphan",
     )
     clauses: Mapped[list["ContractClause"]] = relationship(
-        back_populates="contract", cascade="all, delete-orphan",
-    )
-    risks: Mapped[list["ContractRisk"]] = relationship(
         back_populates="contract", cascade="all, delete-orphan",
     )
     ocr_blocks: Mapped[list["OCRBlock"]] = relationship(
@@ -99,7 +96,6 @@ class ExtractedField(Base):
     )
     field_key: Mapped[str] = mapped_column(String(100), nullable=False)
     field_name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
-    field_category: Mapped[str] = mapped_column(String(50), nullable=False)
     value: Mapped[str | None] = mapped_column(Text)
     value_type: Mapped[str] = mapped_column(String(20), nullable=False, default="string")
     source_text: Mapped[str | None] = mapped_column(Text)
@@ -107,6 +103,10 @@ class ExtractedField(Base):
     page_end: Mapped[int | None] = mapped_column(Integer)
     bbox: Mapped[dict | None] = mapped_column(JSONType)
     confidence: Mapped[float | None] = mapped_column(Float)
+    # Source tracing — links extracted value back to OCR paragraph / block range
+    source_paragraph_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_block_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_block_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
     review_status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="pending",
     )
@@ -150,6 +150,11 @@ class ContractClause(Base):
     start_char: Mapped[int | None] = mapped_column(Integer)
     end_char: Mapped[int | None] = mapped_column(Integer)
     confidence: Mapped[float | None] = mapped_column(Float)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    level: Mapped[int] = mapped_column(Integer, default=0)
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("contract_clauses.id"), nullable=True,
+    )
     review_status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="pending",
     )
@@ -164,47 +169,4 @@ class ContractClause(Base):
 
     __table_args__ = (
         Index("ix_cc_contract_type", "contract_id", "clause_type"),
-    )
-
-
-# ---------------------------------------------------------------------------
-# ContractRisk — a single identified risk
-# ---------------------------------------------------------------------------
-
-class ContractRisk(Base):
-    __tablename__ = "contract_risks"
-
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    contract_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("contracts.id"), nullable=False, index=True,
-    )
-    field_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("extracted_fields.id"), nullable=True,
-    )
-    clause_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("contract_clauses.id"), nullable=True,
-    )
-    risk_level: Mapped[str] = mapped_column(String(20), nullable=False)
-    risk_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    description: Mapped[str] = mapped_column(Text, nullable=False)
-    evidence: Mapped[str | None] = mapped_column(Text)
-    suggestion: Mapped[str | None] = mapped_column(Text)
-    source_text: Mapped[str | None] = mapped_column(Text)
-    page_no: Mapped[int | None] = mapped_column(Integer)
-    review_status: Mapped[str] = mapped_column(
-        String(20), nullable=False, default="pending",
-    )
-    reviewer_id: Mapped[str | None] = mapped_column(String(100))
-    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now(), nullable=False,
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False,
-    )
-
-    contract: Mapped["Contract"] = relationship(back_populates="risks")
-
-    __table_args__ = (
-        Index("ix_cr_contract_level", "contract_id", "risk_level"),
     )

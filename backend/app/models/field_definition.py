@@ -15,7 +15,6 @@ class FieldDefinition(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     field_key: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
     field_name: Mapped[str] = mapped_column(String(200), nullable=False)
-    field_category: Mapped[str] = mapped_column(String(50), nullable=False, default="party")
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
     value_type: Mapped[str] = mapped_column(String(20), nullable=False, default="string")
     required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

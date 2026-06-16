@@ -58,13 +58,3 @@ async def test_list_clauses_empty(client, sample_pdf_content, tmp_upload_dir):
     response = await client.get(f"/api/v1/contracts/{contract_id}/clauses")
     assert response.status_code == 200
     assert response.json() == []
-
-
-@pytest.mark.asyncio
-async def test_list_risks_empty(client, sample_pdf_content, tmp_upload_dir):
-    resp = await _upload(client, "risks_test.pdf", sample_pdf_content)
-    contract_id = resp.json()["data"]["contract_id"]
-
-    response = await client.get(f"/api/v1/contracts/{contract_id}/risks")
-    assert response.status_code == 200
-    assert response.json() == []

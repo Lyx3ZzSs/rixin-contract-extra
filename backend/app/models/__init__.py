@@ -3,7 +3,6 @@ from app.models.contract import (
     Contract,
     ContractClause,
     ContractFile,
-    ContractRisk,
     ExtractedField,
 )
 from app.models.ocr import OCRBlock
@@ -14,7 +13,6 @@ __all__ = [
     "Contract",
     "ContractFile",
     "ContractClause",
-    "ContractRisk",
     "ExtractedField",
     "OCRBlock",
     "ContractTask",

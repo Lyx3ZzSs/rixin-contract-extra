@@ -18,7 +18,7 @@ class ReviewRecord(Base):
     )
     target_type: Mapped[str] = mapped_column(
         String(20), nullable=False,
-        comment="field / clause / risk / contract",
+        comment="field / clause / contract",
     )
     target_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     action: Mapped[str] = mapped_column(

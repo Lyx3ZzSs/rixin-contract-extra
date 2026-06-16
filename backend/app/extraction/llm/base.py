@@ -5,7 +5,12 @@ from app.extraction.base import ExtractionResult
 
 class LLMProvider(ABC):
     @abstractmethod
-    def extract_fields(self, full_text: str, contract_type: str | None = None) -> ExtractionResult:
+    def extract_fields(
+        self,
+        full_text: str,
+        contract_type: str | None = None,
+        field_definitions: list | None = None,
+    ) -> ExtractionResult:
         ...
 
     @abstractmethod

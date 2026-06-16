@@ -54,7 +54,6 @@ async def _create_contract_with_fields(client_or_content, content_override=None)
             contract_id=contract.id,
             field_key="party-a-name",
             field_name="甲方名称",
-            field_category="party",
             value="北京日新科技有限公司",
             value_type="string",
             source_text="甲方：北京日新科技有限公司",
@@ -66,7 +65,6 @@ async def _create_contract_with_fields(client_or_content, content_override=None)
             contract_id=contract.id,
             field_key="amount",
             field_name="合同金额",
-            field_category="financial",
             value="1200000.00",
             value_type="number",
             source_text="项目总金额为人民币壹佰贰拾万元整",
@@ -365,14 +363,6 @@ class TestReviewRecords:
         )
         assert response.status_code == 200
         assert response.json()["total"] >= 1
-
-        response2 = await client.get(
-            f"/api/v1/contracts/{contract_id}/review/records",
-            params={"target_type": "risk"},
-        )
-        assert response2.status_code == 200
-        assert response2.json()["total"] == 0
-
 
 # ---------------------------------------------------------------------------
 # PATCH /fields/{field_id}/review — existing endpoint still works

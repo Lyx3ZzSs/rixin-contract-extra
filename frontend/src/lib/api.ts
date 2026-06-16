@@ -61,10 +61,9 @@ export async function uploadContract(file: File, customFields?: FieldDefinitionI
   const formData = new FormData();
   formData.append("file", file);
   if (customFields && customFields.length > 0) {
-    const fields = customFields.map(({ field_key, field_name, field_category, description, value_type }) => ({
+    const fields = customFields.map(({ field_key, field_name, description, value_type }) => ({
       field_key,
       field_name,
-      field_category,
       description,
       value_type,
     }));
@@ -196,7 +195,6 @@ export interface FieldDefinitionItem {
   id: string;
   field_key: string;
   field_name: string;
-  field_category: string;
   description: string;
   value_type: string;
   required: boolean;
@@ -222,7 +220,7 @@ export async function createFieldDefinition(
 
 export async function updateFieldDefinition(
   fieldKey: string,
-  updates: Partial<Pick<FieldDefinitionItem, "field_name" | "field_category" | "description" | "value_type" | "required" | "sort_order" | "is_active">>,
+  updates: Partial<Pick<FieldDefinitionItem, "field_name" | "description" | "value_type" | "required" | "sort_order" | "is_active">>,
 ): Promise<FieldDefinitionItem> {
   const response = await fetch(toApiUrl(`/api/v1/field-definitions/${fieldKey}`), {
     method: "PUT",

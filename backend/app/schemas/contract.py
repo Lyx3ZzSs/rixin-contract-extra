@@ -57,13 +57,15 @@ class FieldDetail(BaseModel):
     id: uuid.UUID
     field_name: str
     field_key: str = ""
-    field_category: str
     value: str | None
     value_type: str
     source_text: str | None
     page_no: int | None
     bbox: dict | None
     confidence: float | None
+    source_paragraph_id: int | None = None
+    source_block_start: int | None = None
+    source_block_end: int | None = None
     review_status: str
     reviewed_value: str | None
     reviewer_id: str | None
@@ -80,25 +82,9 @@ class ClauseDetail(BaseModel):
     page_end: int | None = None
     bbox: dict | None
     confidence: float | None
+    level: int = 0
+    parent_id: uuid.UUID | None = None
     review_status: str
-
-    model_config = {"from_attributes": True}
-
-
-class RiskDetail(BaseModel):
-    id: uuid.UUID
-    field_id: uuid.UUID | None
-    clause_id: uuid.UUID | None
-    risk_level: str
-    risk_type: str
-    description: str
-    evidence: str | None = None
-    suggestion: str | None
-    source_text: str | None
-    page_no: int | None
-    review_status: str
-    reviewer_id: str | None
-    reviewed_at: datetime | None
 
     model_config = {"from_attributes": True}
 
@@ -118,6 +104,5 @@ class ContractDetail(BaseModel):
     files: list[FileBrief] = []
     fields: list[FieldDetail] = []
     clauses: list[ClauseDetail] = []
-    risks: list[RiskDetail] = []
 
     model_config = {"from_attributes": True}

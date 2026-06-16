@@ -13,7 +13,7 @@ class ReviewAction(BaseModel):
 
 
 class BatchReviewItem(BaseModel):
-    target_type: str  # field / clause / risk
+    target_type: str  # field / clause
     target_id: uuid.UUID
     action: str  # approve / reject / modify
     new_value: str | None = None

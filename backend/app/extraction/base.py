@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel
 
 
@@ -30,6 +32,8 @@ class OCRTextBlock(BaseModel):
     bbox: BBox | None = None
     confidence: float = 0.0
     sort_order: int = 0
+    paragraph_id: int | None = None   # groups blocks into logical paragraphs
+    font_size: float | None = None    # font size in points (from PPStructure / pymupdf)
 
 
 class OCRPageResult(BaseModel):
@@ -73,7 +77,6 @@ class FieldSpec(BaseModel):
     """
     field_key: str
     field_name: str
-    field_category: str = "basic"
     description: str = ""
     value_type: str = "string"
 
@@ -88,12 +91,12 @@ class ClauseSegment(BaseModel):
     end_char: int | None = None
     bbox: BBox | None = None
     confidence: float = 0.0
+    level: int = 0  # 0=article(条), 1=section(款), 2=sub-clause(项)
 
 
 class ExtractedField(BaseModel):
     field_key: str
     field_name: str = ""
-    field_category: str  # basic / financial / date / party / clause
     value: str | None = None
     value_type: str = "string"
     source_text: str | None = None
@@ -108,16 +111,29 @@ class ExtractionResult(BaseModel):
     key_clauses: list[ClauseSegment]
 
 
-class RiskItem(BaseModel):
-    risk_level: str  # high / medium / low
-    risk_type: str  # missing_field / abnormal_value / unfair_clause / compliance / …
-    description: str
-    evidence: str | None = None
-    suggestion: str | None = None
-    source_text: str | None = None
-    page_no: int | None = None
+# ---------------------------------------------------------------------------
+# Raw LLM response models — used as Instructor response_model
+# ---------------------------------------------------------------------------
+
+class RawExtractedField(BaseModel):
+    """Single field in the raw LLM output — mirrors the JSON schema the LLM
+    is instructed to follow."""
+    field_key: str
     field_name: str | None = None
-    clause_index: int | None = None
+    field_value: Any = None
+    source_text: str | None = None
+    source_page: int | None = None
+    source_bbox: list[float] | None = None
+    confidence: float = 0.8
+    review_status: str = "extracted"
+
+
+class RawExtractionResult(BaseModel):
+    """Top-level structure of what the LLM returns."""
+    fields: list[RawExtractedField] = []
+    contract_type: str | None = None
+    contract_type_confidence: float = 0.0
+    key_clauses: list[dict] = []
 
 
 class RuleViolation(BaseModel):

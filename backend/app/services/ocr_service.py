@@ -68,6 +68,8 @@ class OCRService:
                     confidence=block.confidence,
                     bbox=block.bbox.model_dump() if block.bbox else None,
                     sort_order=block.sort_order,
+                    paragraph_id=block.paragraph_id,
+                    font_size=block.font_size,
                     page_width=page.width,
                     page_height=page.height,
                 )

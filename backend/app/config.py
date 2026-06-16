@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.1
     llm_timeout: int = 120
 
+    # DSPy — optional prompt optimization
+    llm_use_dspy: bool = False
+    llm_dspy_examples_path: str = "data/extraction_examples.jsonl"
+
     # Upload
     upload_dir: str = "uploads/contracts"
     max_file_size: int = 100 * 1024 * 1024  # 100 MB

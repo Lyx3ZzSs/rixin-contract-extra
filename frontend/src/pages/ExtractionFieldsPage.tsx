@@ -20,6 +20,7 @@ const EMPTY_DRAFT: FieldDraft = {
 export function ExtractionFieldsPage() {
   const [fields, setFields] = useState<FieldDefinitionItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [editingFieldKey, setEditingFieldKey] = useState("");
   const [isAdding, setIsAdding] = useState(false);
@@ -27,11 +28,15 @@ export function ExtractionFieldsPage() {
 
   const loadFields = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const items = await readExtractionFieldLibrary();
       setFields(items);
-    } catch {
-      // ignore
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "加载字段列表失败";
+      console.error("Failed to load field definitions:", err);
+      setError(message);
+      setFields([]);
     } finally {
       setLoading(false);
     }
@@ -84,8 +89,8 @@ export function ExtractionFieldsPage() {
       } else if (editingFieldKey) {
         await updateExtractionField(editingFieldKey, { name, description });
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      console.error("Failed to save field:", err);
     }
     cancelDraft();
     await loadFields();
@@ -94,8 +99,8 @@ export function ExtractionFieldsPage() {
   async function removeField(fieldKey: string) {
     try {
       await deleteExtractionField(fieldKey);
-    } catch {
-      // ignore — loadFields will still fetch latest from server
+    } catch (err) {
+      console.error("Failed to delete field:", err);
     }
     if (editingFieldKey === fieldKey) cancelDraft();
     await loadFields();
@@ -104,8 +109,8 @@ export function ExtractionFieldsPage() {
   async function restoreDefaults() {
     try {
       await resetExtractionFieldLibrary();
-    } catch {
-      // ignore
+    } catch (err) {
+      console.error("Failed to restore defaults:", err);
     }
     setQuery("");
     cancelDraft();
@@ -115,8 +120,8 @@ export function ExtractionFieldsPage() {
   async function toggleRequired(field: FieldDefinitionItem) {
     try {
       await updateExtractionField(field.field_key, { required: !field.required });
-    } catch {
-      // ignore
+    } catch (err) {
+      console.error("Failed to toggle required:", err);
     }
     await loadFields();
   }
@@ -164,6 +169,16 @@ export function ExtractionFieldsPage() {
         </div>
 
         {loading && <div style={{ padding: "1rem", color: "#888" }}>加载中...</div>}
+
+        {error && !loading && (
+          <div
+            className="field-library-error"
+            style={{ padding: "0.75rem 1rem", background: "#fff0f0", color: "#b91c1c", borderRadius: 6, border: "1px solid #fca5a5", marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: "0.5rem" }}
+          >
+            <strong>加载失败：</strong>
+            <span>{error}</span>
+          </div>
+        )}
 
         {isAdding && (
           <FieldEditor
@@ -243,7 +258,7 @@ function FieldEditor({
 }) {
   return (
     <div className="field-library-editor" aria-label={title}>
-      <strong>{title}</strong>
+      <strong className="field-library-editor-title">{title}</strong>
       <label>
         <span>字段名称</span>
         <input
@@ -262,6 +277,7 @@ function FieldEditor({
           placeholder="用于提示模型抽取的字段含义"
         />
       </label>
+      <span aria-hidden="true" />
       <div className="field-library-editor-actions">
         <button type="button" onClick={onSave} disabled={!draft.field_name.trim()}>
           <Save aria-hidden="true" />

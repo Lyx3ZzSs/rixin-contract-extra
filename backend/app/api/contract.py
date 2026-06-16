@@ -42,7 +42,6 @@ async def _load_contract_detail(db: AsyncSession, contract_id: uuid.UUID) -> Con
             selectinload(Contract.files),
             selectinload(Contract.fields),
             selectinload(Contract.clauses),
-            selectinload(Contract.risks),
         )
         .where(Contract.id == contract_id)
     )
@@ -174,12 +173,6 @@ async def approve_contract(
     for clause in contract.clauses:
         if clause.review_status == "pending":
             clause.review_status = "approved"
-
-    for risk in contract.risks:
-        if risk.review_status == "pending":
-            risk.review_status = "accepted"
-            risk.reviewer_id = reviewer_id
-            risk.reviewed_at = datetime.now(timezone.utc)
 
     contract.status = "approved"
     contract.updated_at = datetime.now(timezone.utc)

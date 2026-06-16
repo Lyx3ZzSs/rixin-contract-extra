@@ -73,15 +73,14 @@ async def extract_and_save(
     field_specs: list[FieldSpec] = [
         FieldSpec(
             field_key=f.field_key, field_name=f.field_name,
-            field_category=f.field_category, description=f.description,
-            value_type=f.value_type,
+            description=f.description, value_type=f.value_type,
         )
         for f in db_fields
     ]
     for cf in custom_fields:
         field_specs.append(FieldSpec(**cf))
 
-    # Build lookup for save_fields (FieldSpec has .field_category and .value_type)
+    # Build lookup for save_fields.
     field_map: dict[str, FieldSpec] = {fs.field_key: fs for fs in field_specs}
 
     contract_type, type_confidence = await LLMService.classify_contract_type(full_text)
@@ -125,9 +124,6 @@ async def save_fields(
 
     records: list[ExtractedField] = []
     for f in fields:
-        defn = field_map.get(f.field_key)
-        field_category = f.field_category or (defn.field_category if defn else "basic")
-
         bbox_val = None
         if f.bbox is not None:
             bbox_val = f.bbox.model_dump()
@@ -136,7 +132,6 @@ async def save_fields(
             contract_id=contract_id,
             field_key=f.field_key,
             field_name=f.field_name,
-            field_category=field_category,
             value=f.value,
             value_type=f.value_type,
             source_text=f.source_text,

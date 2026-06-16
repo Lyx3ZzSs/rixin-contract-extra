@@ -27,7 +27,6 @@ def _field(name: str, value: str | None = None, category: str = "basic",
            source_text: str | None = None, confidence: float = 0.9) -> ExtractedField:
     return ExtractedField(
         field_key=name,
-        field_category=category,
         value=value,
         source_text=source_text,
         page_no=1,

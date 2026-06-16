@@ -51,14 +51,6 @@ export interface BBox {
 
 // ────────────────────────────────────────────────────────────
 // Backend-matching types (aligned with Pydantic schemas)
-
-export interface BBox {
-  x0: number;
-  y0: number;
-  x1: number;
-  y1: number;
-}
-
 // ────────────────────────────────────────────────────────────
 
 export interface ApiResponse<T = unknown> {
@@ -102,11 +94,13 @@ export interface FieldDetail {
   id: string;
   field_name: string;
   field_key: string;
-  field_category: string;
   value: string | null;
   source_text: string | null;
   page_no: number | null;
   confidence: number | null;
+  source_paragraph_id?: number | null;
+  source_block_start?: number | null;
+  source_block_end?: number | null;
   extract_method: string;
   review_status: string;
 }
@@ -118,17 +112,8 @@ export interface ClauseDetail {
   content: string;
   page_no: number | null;
   confidence: number | null;
-  review_status: string;
-}
-
-export interface RiskDetail {
-  id: string;
-  risk_level: string;
-  risk_type: string;
-  description: string;
-  evidence: string | null;
-  suggestion: string | null;
-  source_text: string | null;
+  level?: number;
+  parent_id?: string | null;
   review_status: string;
 }
 
@@ -140,7 +125,6 @@ export interface ContractDetail {
   files: FileBrief[];
   fields: FieldDetail[];
   clauses: ClauseDetail[];
-  risks: RiskDetail[];
   created_at: string;
   updated_at: string;
 }
@@ -157,24 +141,9 @@ export interface TaskDetail {
 }
 
 
-export interface BBox {
-  x0: number;
-  y0: number;
-  x1: number;
-  y1: number;
-}
-
 // ────────────────────────────────────────────────────────────
 // Mapper functions: backend types → UI types
 
-export interface BBox {
-  x0: number;
-  y0: number;
-  x1: number;
-  y1: number;
-}
-
-// ────────────────────────────────────────────────────────────
 
 export function fieldDetailToExtractionFieldValue(f: FieldDetail): ExtractionFieldValue {
   let status: ExtractionFieldStatus;

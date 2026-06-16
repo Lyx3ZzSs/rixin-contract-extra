@@ -23,7 +23,6 @@ router = APIRouter(prefix="/field-definitions", tags=["field-definitions"])
 class FieldDefinitionCreate(BaseModel):
     field_key: str
     field_name: str
-    field_category: str = "party"
     description: str = ""
     value_type: str = "string"
     required: bool = False
@@ -32,7 +31,6 @@ class FieldDefinitionCreate(BaseModel):
 
 class FieldDefinitionUpdate(BaseModel):
     field_name: str | None = None
-    field_category: str | None = None
     description: str | None = None
     value_type: str | None = None
     required: bool | None = None
@@ -50,7 +48,6 @@ class FieldDefinitionOut(BaseModel):
 
     field_key: str
     field_name: str
-    field_category: str
     description: str
     value_type: str
     required: bool

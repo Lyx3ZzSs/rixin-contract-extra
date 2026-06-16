@@ -1,9 +1,8 @@
 """Rule-based validation service.
 
 Orchestrates all registered validation rules and returns a
-``ValidationResult`` that the risk service can consume.  Validation
-failures never interrupt the pipeline — they become violations that
-feed into risk generation.
+``ValidationResult`` for downstream review and quality checks. Validation
+failures never interrupt the pipeline.
 
 Public API:
   - ``validate_fields(fields)``              — run field-only rules

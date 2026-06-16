@@ -16,6 +16,7 @@ from app.services.llm_service import (
     RawExtractedField,
     _extract_json_from_text,
 )
+from app.extraction.llm.qwen import _build_dynamic_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +110,49 @@ class TestRawExtractionResult:
         field = result.fields[0]
         assert field.source_bbox == [100, 200, 500, 240]
         assert field.source_page == 2
+
+
+# ---------------------------------------------------------------------------
+# Dynamic prompt generation
+# ---------------------------------------------------------------------------
+
+class TestDynamicPrompt:
+    def test_prompt_uses_field_specs_without_category(self):
+        prompt = _build_dynamic_prompt(
+            [
+                FieldSpec(
+                    field_key="contract-amount",
+                    field_name="合同金额",
+                    description="合同总金额，包括币种和数额",
+                    value_type="string",
+                ),
+            ],
+            "合同总金额为人民币10万元。",
+            "service",
+        )
+
+        assert "field_key=contract-amount" in prompt
+        assert "field_name=合同金额" in prompt
+        assert "value_type=string" in prompt
+        assert "description=合同总金额，包括币种和数额" in prompt
+        assert "合同类型参考" in prompt
+        assert "字段类别" not in prompt
+        assert "field_category" not in prompt
+
+    def test_prompt_has_completeness_and_evidence_rules(self):
+        prompt = _build_dynamic_prompt(
+            [
+                FieldSpec(field_key="party-a-name", field_name="甲方名称"),
+                FieldSpec(field_key="sign-date", field_name="签署日期"),
+            ],
+            "甲方：测试公司\n签署日期：2024年1月1日",
+        )
+
+        assert "必须覆盖“需要抽取的字段”中的每一个 field_key" in prompt
+        assert "不得新增未请求的字段" in prompt
+        assert "每个 field_key 只能出现一次" in prompt
+        assert "source_text 必须是合同原文片段" in prompt
+        assert "甲方/乙方/当事人优先查合同首部和签章区" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -242,39 +286,39 @@ class TestLLMServiceParseRawJson:
         assert isinstance(result, ExtractionResult)
         assert result.contract_type == "service"
 
-    def test_field_category_from_definition(self):
-        """Field category should be resolved from field_map_override."""
+    def test_value_type_from_definition(self):
+        """Value type should be resolved from field_map_override."""
         from app.extraction.base import FieldSpec
         fmap = {
             "party-a-name": FieldSpec(
-                field_key="party-a-name", field_name="甲方名称", field_category="party",
+                field_key="party-a-name", field_name="甲方名称", value_type="string",
             ),
-            "party-b-address": FieldSpec(
-                field_key="party-b-address", field_name="乙方通讯地址", field_category="party",
+            "contract-amount": FieldSpec(
+                field_key="contract-amount", field_name="合同金额", value_type="number",
             ),
         }
         json_text = json.dumps({
             "fields": [
                 {"field_key": "party-a-name", "field_value": "测试公司"},
-                {"field_key": "party-b-address", "field_value": "上海市浦东新区"},
+                {"field_key": "contract-amount", "field_value": "10000"},
             ],
         })
         result = LLMService._parse_raw_json(json_text, None, field_map_override=fmap)
         name_field = next(f for f in result.fields if f.field_key == "party-a-name")
-        assert name_field.field_category == "party"
+        assert name_field.value_type == "string"
 
-        addr_field = next(f for f in result.fields if f.field_key == "party-b-address")
-        assert addr_field.field_category == "party"
+        amount_field = next(f for f in result.fields if f.field_key == "contract-amount")
+        assert amount_field.value_type == "number"
 
-    def test_field_category_defaults_to_basic_without_map(self):
-        """Without field_map_override, category should default to 'basic'."""
+    def test_value_type_defaults_to_string_without_map(self):
+        """Without field_map_override, value_type should default to 'string'."""
         json_text = json.dumps({
             "fields": [
                 {"field_key": "party-a-name", "field_value": "测试公司"},
             ],
         })
         result = LLMService._parse_raw_json(json_text, None)
-        assert result.fields[0].field_category == "basic"
+        assert result.fields[0].value_type == "string"
 
 
 # ---------------------------------------------------------------------------
@@ -295,26 +339,25 @@ class TestRawFieldConversion:
         ]
         fmap = {
             "party-a-name": FieldSpec(
-                field_key="party-a-name", field_name="甲方名称", field_category="party",
+                field_key="party-a-name", field_name="甲方名称",
             ),
         }
         fields = LLMService._convert_raw_fields(raw, field_map_override=fmap)
         assert len(fields) == 1
         f = fields[0]
         assert f.field_key == "party-a-name"
-        assert f.field_category == "party"
         assert f.value == "北京测试公司"
         assert f.bbox is not None
         assert f.bbox.x1 == 100
         assert f.confidence == 0.97
 
     def test_convert_raw_fields_unknown_key(self):
-        """Unknown field_key should default to category='basic'."""
+        """Unknown field_key should default to value_type='string'."""
         raw = [
             RawExtractedField(field_key="custom_field", field_value="hello"),
         ]
         fields = LLMService._convert_raw_fields(raw)
-        assert fields[0].field_category == "basic"
+        assert fields[0].value_type == "string"
 
     def test_convert_raw_fields_none_value(self):
         raw = [

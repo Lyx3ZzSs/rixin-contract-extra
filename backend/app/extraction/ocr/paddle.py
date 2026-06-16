@@ -150,9 +150,14 @@ class PaddleOCRProvider(OCRProvider):
                 if block.get("type") != 0:
                     continue
                 parts: list[str] = []
+                max_font_size: float = 0.0
                 for line in block.get("lines", []):
                     for span in line.get("spans", []):
                         parts.append(span.get("text", ""))
+                        # Capture largest font size in this block
+                        sz = span.get("size", 0)
+                        if sz > max_font_size:
+                            max_font_size = float(sz)
                     parts.append("\n")
                 text = "".join(parts).strip()
                 if not text:
@@ -174,6 +179,7 @@ class PaddleOCRProvider(OCRProvider):
                     bbox=bbox_obj,
                     confidence=1.0,
                     sort_order=sort,
+                    font_size=max_font_size if max_font_size > 0 else None,
                 ))
 
             # Scan page detection
@@ -302,6 +308,11 @@ class PaddleOCRProvider(OCRProvider):
         if isinstance(data, list):
             return data
         if isinstance(data, dict):
+            # Handle layout-aware response (PPStructureV3+)
+            layout = data.get("layout")
+            if layout and isinstance(layout, list):
+                logger.debug("PPStructure returned layout-paragraphs response (%d paragraphs)", len(layout))
+                return layout
             for key in ("result", "results", "regions", "layout_parsing_result"):
                 if key in data:
                     val = data[key]
@@ -309,6 +320,7 @@ class PaddleOCRProvider(OCRProvider):
                         return val
             if all(k.isdigit() for k in data.keys()):
                 return list(data.values())
+            logger.debug("PPStructure unexpected response keys: %s", list(data.keys()))
         return []
 
     @staticmethod

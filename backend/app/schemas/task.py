@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 class TaskCreate(BaseModel):
     contract_id: uuid.UUID
-    task_type: str  # ocr / extraction / rule_validation / risk_identification
+    task_type: str  # ocr / extraction / rule_validation
 
 
 class TaskDetail(BaseModel):

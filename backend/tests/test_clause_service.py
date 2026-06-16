@@ -22,66 +22,66 @@ from app.services.clause_service import (
 
 class TestIsClauseMarker:
     def test_article_cn_1(self):
-        name, marker, title = _is_clause_marker("第一条 项目概述")
+        name, marker, title, _level = _is_clause_marker("第一条 项目概述")
         assert name == "article_cn"
         assert "第一条" in marker
         assert title == "项目概述"
 
     def test_article_cn_number(self):
-        name, marker, title = _is_clause_marker("第3条 付款方式")
+        name, marker, title, _level = _is_clause_marker("第3条 付款方式")
         assert name == "article_cn"
         assert title == "付款方式"
 
     def test_article_cn_no_title(self):
-        name, marker, title = _is_clause_marker("第十条")
+        name, marker, title, _level = _is_clause_marker("第十条")
         assert name == "article_cn"
         assert title is None
 
     def test_section_cn(self):
-        name, marker, title = _is_clause_marker("一、项目背景")
+        name, marker, title, _level = _is_clause_marker("一、项目背景")
         assert name == "section_cn"
         assert title == "项目背景"
 
     def test_paren_cn(self):
-        name, marker, title = _is_clause_marker("（一）甲方权利")
+        name, marker, title, _level = _is_clause_marker("（一）甲方权利")
         assert name == "paren_cn"
         assert title == "甲方权利"
 
     def test_paren_num(self):
-        name, marker, title = _is_clause_marker("（1）首期款")
+        name, marker, title, _level = _is_clause_marker("（1）首期款")
         assert name == "paren_num"
         assert title == "首期款"
 
     def test_dotted_multi(self):
-        name, marker, title = _is_clause_marker("1.1.1 技术标准")
+        name, marker, title, _level = _is_clause_marker("1.1.1 技术标准")
         assert name == "dotted_multi"
         assert title == "技术标准"
 
     def test_num_dot(self):
-        name, marker, title = _is_clause_marker("1. 项目目标")
+        name, marker, title, _level = _is_clause_marker("1. 项目目标")
         assert name == "num_dot"
         assert title == "项目目标"
 
     def test_article_en(self):
-        name, marker, title = _is_clause_marker("Article 1 Scope")
+        name, marker, title, _level = _is_clause_marker("Article 1 Scope")
         assert name == "article_en"
         assert title == "Scope"
 
     def test_article_en_upper(self):
-        name, marker, title = _is_clause_marker("ARTICLE 3 TERMINATION")
+        name, marker, title, _level = _is_clause_marker("ARTICLE 3 TERMINATION")
         assert name == "article_en"
         assert title == "TERMINATION"
 
     def test_non_marker(self):
-        name, marker, title = _is_clause_marker("甲方：北京科技有限公司")
+        name, marker, title, _level = _is_clause_marker("甲方：北京科技有限公司")
         assert name is None
 
     def test_empty(self):
-        name, marker, title = _is_clause_marker("")
+        name, marker, title, _level = _is_clause_marker("")
         assert name is None
 
     def test_short(self):
-        name, marker, title = _is_clause_marker("第")
+        name, marker, title, _level = _is_clause_marker("第")
         assert name is None
 
 
@@ -254,18 +254,29 @@ class TestSplitClausesFromBlocks:
         assert "第二段描述" in article.content
 
     def test_preamble_without_marker(self):
-        """Text before the first article marker should be preserved as preamble."""
+        """Text before the first article marker should be preserved as preamble.
+
+        With layout-aware splitting, title-type blocks before the first article
+        marker get their own clauses.  The preamble is still preserved, just
+        with inferred titles from the block text.
+        """
         ocr = _make_ocr_result([
             (1, [
-                ("title", "合同编号：HT-2024-001", 1),
+                ("text", "合同编号：HT-2024-001", 1),
                 ("text", "甲方：北京日新科技有限公司", 2),
                 ("title", "第一条 项目概述", 3),
                 ("text", "项目描述内容。", 4),
             ]),
         ])
         clauses = split_clauses_from_blocks(ocr)
-        preamble = [c for c in clauses if c.clause_title is None]
-        assert len(preamble) >= 1
+        # Preamble blocks should appear before the first article
+        first_article_idx = next(
+            (i for i, c in enumerate(clauses)
+             if c.clause_title and "第一条" in c.clause_title),
+            None,
+        )
+        assert first_article_idx is not None
+        assert first_article_idx >= 1  # at least the preamble before the first article
 
     def test_confidence_averaged(self):
         ocr = _make_ocr_result([

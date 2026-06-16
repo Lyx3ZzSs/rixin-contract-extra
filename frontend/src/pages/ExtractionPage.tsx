@@ -208,7 +208,6 @@ useEffect(() => {
         id: "",
         field_key,
         field_name: name,
-        field_category: "party",
         description,
         value_type: "string",
         required: false,
@@ -247,7 +246,6 @@ useEffect(() => {
     clause_splitting: "正在拆分条款...",
     field_extracting: "正在提取字段...",
     validating: "正在校验数据...",
-    risk_analyzing: "正在分析风险...",
     review_pending: "等待复核...",
     completed: "处理完成",
   };

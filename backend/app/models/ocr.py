@@ -25,6 +25,8 @@ class OCRBlock(Base):
     confidence: Mapped[float | None] = mapped_column(Float)
     bbox: Mapped[dict | None] = mapped_column(JSONType)
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    paragraph_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    font_size: Mapped[float | None] = mapped_column(Float, nullable=True)
     page_width: Mapped[int | None] = mapped_column(Integer)
     page_height: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(

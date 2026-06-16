@@ -1,4 +1,4 @@
-"""Review API endpoints — field correction, clause/risk review, audit trail.
+"""Review API endpoints — field correction, clause review, audit trail.
 
 Key endpoints:
   POST   /contracts/{id}/review              — correct field values (Phase 9)
@@ -7,8 +7,6 @@ Key endpoints:
   PATCH  /contracts/{id}/fields/{fid}/review  — single field review
   GET    /contracts/{id}/clauses              — list clauses
   PATCH  /contracts/{id}/clauses/{cid}/review — single clause review
-  GET    /contracts/{id}/risks                — list risks
-  PATCH  /contracts/{id}/risks/{rid}/review   — single risk review
   POST   /contracts/{id}/review/batch         — batch review
 """
 
@@ -22,9 +20,9 @@ from sqlalchemy import select, func as sa_func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models.contract import ContractClause, ExtractedField, ContractRisk
+from app.models.contract import ContractClause, ExtractedField
 from app.models.review import ReviewRecord
-from app.schemas.contract import ClauseDetail, FieldDetail, RiskDetail
+from app.schemas.contract import ClauseDetail, FieldDetail
 from app.schemas.review import (
     BatchReviewRequest,
     ContractReviewRequest,
@@ -307,63 +305,6 @@ async def review_clause(
 
 
 # ---------------------------------------------------------------------------
-# Risk listing and review
-# ---------------------------------------------------------------------------
-
-@router.get("/risks", response_model=list[RiskDetail])
-async def list_risks(
-    contract_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-):
-    result = await db.execute(
-        select(ContractRisk).where(ContractRisk.contract_id == contract_id)
-    )
-    return [RiskDetail.model_validate(r) for r in result.scalars().all()]
-
-
-@router.patch("/risks/{risk_id}/review", response_model=RiskDetail)
-async def review_risk(
-    contract_id: uuid.UUID,
-    risk_id: uuid.UUID,
-    body: ReviewAction,
-    reviewer_id: str | None = None,
-    db: AsyncSession = Depends(get_db),
-):
-    result = await db.execute(
-        select(ContractRisk).where(
-            ContractRisk.id == risk_id,
-            ContractRisk.contract_id == contract_id,
-        )
-    )
-    risk = result.scalar_one_or_none()
-    if not risk:
-        raise HTTPException(404, "Risk not found")
-
-    if body.action == "approve":
-        risk.review_status = "accepted"
-    elif body.action == "reject":
-        risk.review_status = "dismissed"
-    else:
-        risk.review_status = body.action
-
-    risk.reviewer_id = reviewer_id
-    risk.reviewed_at = datetime.now(timezone.utc)
-
-    record = ReviewRecord(
-        contract_id=contract_id,
-        target_type="risk",
-        target_id=risk_id,
-        action=body.action,
-        comment=body.comment,
-        reviewer_id=reviewer_id,
-    )
-    db.add(record)
-    await db.flush()
-
-    return RiskDetail.model_validate(risk)
-
-
-# ---------------------------------------------------------------------------
 # Batch review
 # ---------------------------------------------------------------------------
 
@@ -412,21 +353,6 @@ async def batch_review(
             target = result.scalar_one_or_none()
             if target:
                 target.review_status = item.action if item.action in ("approved", "rejected") else "reviewed"
-
-        elif item.target_type == "risk":
-            result = await db.execute(
-                select(ContractRisk).where(ContractRisk.id == item.target_id)
-            )
-            target = result.scalar_one_or_none()
-            if target:
-                if item.action == "approve":
-                    target.review_status = "accepted"
-                elif item.action == "reject":
-                    target.review_status = "dismissed"
-                else:
-                    target.review_status = item.action
-                target.reviewer_id = body.reviewer_id
-                target.reviewed_at = datetime.now(timezone.utc)
 
     await db.flush()
     return [ReviewRecordOut.model_validate(r) for r in records]

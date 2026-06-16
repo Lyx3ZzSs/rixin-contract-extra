@@ -10,11 +10,7 @@ import {
 export type { FieldDefinitionItem as ExtractionFieldDefinition };
 
 export async function readExtractionFieldLibrary(): Promise<FieldDefinitionItem[]> {
-  try {
-    return await listFieldDefinitions();
-  } catch {
-    return [];
-  }
+  return await listFieldDefinitions();
 }
 
 export async function createExtractionField(
@@ -25,7 +21,6 @@ export async function createExtractionField(
   const item = await apiCreate({
     field_key,
     field_name: name.trim(),
-    field_category: "basic",
     description: description.trim(),
     value_type: "string",
     required: false,
