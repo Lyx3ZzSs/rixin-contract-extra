@@ -255,30 +255,29 @@ class PaddleOCRProvider(OCRProvider):
     ) -> list[OCRTextBlock]:
         """Call PPStructure HTTP service and parse results."""
         b64 = base64.b64encode(img_bytes).decode("ascii")
-        payload = {"image": b64}
+        payload = {"file": b64, "fileType": 1}
 
         url = settings.ppstructure_url
         timeout = settings.ocr_timeout
 
         response = self._http_post(url, payload, timeout)
         if response is None:
-            logger.error("PPStructure call failed for page %d", page_no)
-            return []
+            raise RuntimeError(f"PPStructure call failed for page {page_no}")
 
         try:
             data = response.json()
         except (json.JSONDecodeError, ValueError) as exc:
-            logger.error("PPStructure returned invalid JSON: %s", exc)
-            return []
+            raise RuntimeError(f"PPStructure returned invalid JSON: {exc}") from exc
 
         regions = self._normalize_ppstructure_response(data)
 
         blocks: list[OCRTextBlock] = []
         for idx, region in enumerate(regions):
-            rtype = region.get("type", "text")
-            text = region.get("text", "")
+            rtype = region.get("type") or region.get("block_label") or "text"
+            text = region.get("text") or region.get("block_content") or ""
             confidence = region.get("confidence", 0.8)
-            raw_bbox = region.get("bbox")
+            raw_bbox = region.get("bbox") or region.get("block_bbox")
+            raw_sort_order = region.get("block_order")
 
             if rtype == "table":
                 text = self._table_html_to_markdown(text)
@@ -298,8 +297,11 @@ class PaddleOCRProvider(OCRProvider):
                 text=text.strip(),
                 bbox=bbox_obj,
                 confidence=confidence,
-                sort_order=sort_offset + idx + 1,
+                sort_order=sort_offset + (raw_sort_order if isinstance(raw_sort_order, int) else idx + 1),
             ))
+
+        if not blocks:
+            raise RuntimeError(f"PPStructure returned no text blocks for page {page_no}")
 
         return blocks
 
@@ -308,6 +310,40 @@ class PaddleOCRProvider(OCRProvider):
         if isinstance(data, list):
             return data
         if isinstance(data, dict):
+            error_code = data.get("errorCode")
+            if error_code not in (None, 0):
+                log_id = data.get("logId", "-")
+                error_msg = data.get("errorMsg", "unknown PPStructure error")
+                raise RuntimeError(f"PPStructure error {error_code} ({log_id}): {error_msg}")
+
+            result = data.get("result")
+            if isinstance(result, dict):
+                layout_results = result.get("layoutParsingResults")
+                if isinstance(layout_results, list):
+                    regions: list[dict] = []
+                    markdown_texts: list[str] = []
+                    for page_result in layout_results:
+                        if not isinstance(page_result, dict):
+                            continue
+                        pruned = page_result.get("prunedResult")
+                        if isinstance(pruned, dict):
+                            parsing_list = pruned.get("parsing_res_list")
+                            if isinstance(parsing_list, list):
+                                regions.extend(item for item in parsing_list if isinstance(item, dict))
+                        markdown = page_result.get("markdown")
+                        if isinstance(markdown, dict):
+                            text = markdown.get("text")
+                            if isinstance(text, str) and text.strip():
+                                markdown_texts.append(text.strip())
+                    if regions:
+                        return regions
+                    if markdown_texts:
+                        return [{
+                            "block_label": "text",
+                            "block_content": "\n".join(markdown_texts),
+                            "block_order": 1,
+                        }]
+
             # Handle layout-aware response (PPStructureV3+)
             layout = data.get("layout")
             if layout and isinstance(layout, list):
@@ -355,6 +391,13 @@ class PaddleOCRProvider(OCRProvider):
             try:
                 with httpx.Client(timeout=timeout) as client:
                     resp = client.post(url, json=payload)
+                    if resp.status_code >= 400:
+                        try:
+                            error_payload = resp.json()
+                        except (json.JSONDecodeError, ValueError):
+                            error_payload = None
+                        if isinstance(error_payload, dict) and "errorCode" in error_payload:
+                            return resp
                     resp.raise_for_status()
                     return resp
             except httpx.HTTPError as exc:

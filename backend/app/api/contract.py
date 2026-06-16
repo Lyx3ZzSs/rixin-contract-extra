@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, TypeAdapter
-import json
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, Response
 from fastapi import BackgroundTasks
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,9 +20,9 @@ from app.schemas.contract import (
     UploadResponse,
 )
 from app.services import contract_service, file_service, task_service
-from app.extraction.base import FieldSpec
 from app.config import settings
-from app.services.pipeline import run_pipeline
+from app.services.pipeline import run_extraction_pipeline, run_ocr_pipeline, run_pipeline
+from app.models.ocr import OCRBlock
 
 # Max upload size in bytes (from settings)
 _MAX_FILE_SIZE = settings.max_file_size
@@ -52,7 +50,6 @@ async def _load_contract_detail(db: AsyncSession, contract_id: uuid.UUID) -> Con
 @router.post("/upload", status_code=201)
 async def upload_contract(
     background_tasks: BackgroundTasks,
-    custom_fields: str = Form(None),
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
 ) -> ApiResponse:
@@ -100,15 +97,7 @@ async def upload_contract(
     await db.flush()
 
     # 6. Create task record
-    if custom_fields:
-        try:
-            custom_fields_raw = json.loads(custom_fields)
-            custom_fields_list = [cf.model_dump() for cf in TypeAdapter(list[FieldSpec]).validate_python(custom_fields_raw)]
-        except (json.JSONDecodeError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail=f"自定义字段格式错误: {exc}")
-    else:
-        custom_fields_list = None
-    task = await task_service.create_task(db, contract.id, task_type="full_pipeline", custom_fields=custom_fields_list)
+    task = await task_service.create_task(db, contract.id, task_type="full_pipeline")
 
     # 7. Commit so the task/contract/file rows are durable BEFORE the
     #    background pipeline reads them. run_pipeline opens an independent
@@ -123,6 +112,115 @@ async def upload_contract(
     return ApiResponse(
         code=0,
         message="上传成功",
+        data=UploadResponse(
+            contract_id=contract.id,
+            file_id=contract_file.id,
+            task_id=task.id,
+            status=contract.status,
+        ),
+    )
+
+
+@router.post("/prepare", status_code=201)
+async def prepare_contract(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+) -> ApiResponse:
+    """Upload a contract and start OCR-only preprocessing."""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="文件名不能为空")
+
+    file_data = await file.read()
+    if len(file_data) == 0:
+        raise HTTPException(status_code=400, detail="上传文件为空")
+    if len(file_data) > _MAX_FILE_SIZE:
+        raise HTTPException(status_code=400, detail=f"文件大小超过限制 ({_MAX_FILE_SIZE // (1024*1024)} MB)")
+
+    content_type = file.content_type or "application/octet-stream"
+
+    try:
+        file_path, file_type, file_size, content_hash = file_service.save_file(
+            file_data, file.filename,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"文件保存失败: {e}")
+
+    try:
+        contract = await contract_service.create_contract(
+            db, content_hash=content_hash,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    contract_file = ContractFile(
+        contract_id=contract.id,
+        file_name=file.filename,
+        file_path=file_path,
+        file_type=file_type,
+        file_size=file_size,
+        content_type=content_type,
+    )
+    db.add(contract_file)
+    await db.flush()
+
+    task = await task_service.create_task(db, contract.id, task_type="ocr")
+    await db.commit()
+
+    background_tasks.add_task(run_ocr_pipeline, task.id)
+
+    return ApiResponse(
+        code=0,
+        message="预处理已开始",
+        data=UploadResponse(
+            contract_id=contract.id,
+            file_id=contract_file.id,
+            task_id=task.id,
+            status=contract.status,
+        ),
+    )
+
+
+@router.post("/{contract_id}/extract", status_code=202)
+async def extract_prepared_contract(
+    contract_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+) -> ApiResponse:
+    """Start field extraction from previously persisted OCR results."""
+    result = await db.execute(select(Contract).where(Contract.id == contract_id))
+    contract = result.scalar_one_or_none()
+    if not contract:
+        raise HTTPException(404, "Contract not found")
+
+    file_result = await db.execute(
+        select(ContractFile)
+        .where(ContractFile.contract_id == contract_id)
+        .order_by(ContractFile.version.desc())
+        .limit(1)
+    )
+    contract_file = file_result.scalar_one_or_none()
+    if not contract_file:
+        raise HTTPException(404, "Contract file not found")
+
+    block_result = await db.execute(
+        select(OCRBlock.id)
+        .where(OCRBlock.contract_id == contract_id)
+        .limit(1)
+    )
+    if contract.ocr_completed_at is None or block_result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=409, detail="OCR结果尚未准备完成")
+
+    task = await task_service.create_task(db, contract.id, task_type="extraction")
+    await db.commit()
+
+    background_tasks.add_task(run_extraction_pipeline, task.id)
+
+    return ApiResponse(
+        code=0,
+        message="提取已开始",
         data=UploadResponse(
             contract_id=contract.id,
             file_id=contract_file.id,

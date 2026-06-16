@@ -6,7 +6,7 @@ from datetime import datetime
 from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.database import Base, JSONType
+from app.database import Base
 
 
 class ContractTask(Base):
@@ -17,7 +17,6 @@ class ContractTask(Base):
         ForeignKey("contracts.id"), nullable=False, index=True,
     )
     task_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    custom_fields: Mapped[list | None] = mapped_column(JSONType, nullable=True, comment="Per-task custom field definitions for LLM prompt")
     status: Mapped[str] = mapped_column(
         String(30), nullable=False, default="pending",
     )

@@ -55,7 +55,6 @@ async def extract_and_save(
     db: AsyncSession,
     contract_id: uuid.UUID,
     full_text: str,
-    custom_fields: list[dict] = [],
 ) -> ExtractionResult:
     """Run the full extraction pipeline for a contract.
 
@@ -66,7 +65,6 @@ async def extract_and_save(
     5. Persist key clauses to DB.
     """
     # Step 1: Load field definitions from DB
-    # Step 1: Load field definitions from DB and unify with custom fields
     db_fields = await load_field_definitions(db)
 
     # Convert everything to FieldSpec — single type for prompt builder
@@ -77,9 +75,6 @@ async def extract_and_save(
         )
         for f in db_fields
     ]
-    for cf in custom_fields:
-        field_specs.append(FieldSpec(**cf))
-
     # Build lookup for save_fields.
     field_map: dict[str, FieldSpec] = {fs.field_key: fs for fs in field_specs}
 

@@ -879,10 +879,12 @@ h2 {
 }
 
 .extract-upload-zone small {
+  max-width: min(760px, 100%);
   color: #6f7b7d;
   font-size: 0.96rem;
   font-weight: 700;
   line-height: 1.6;
+  overflow-wrap: anywhere;
   text-align: center;
 }
 
@@ -894,6 +896,10 @@ h2 {
   font-style: normal;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.extract-upload-error {
+  margin-top: 14px;
 }
 
 .extract-flow {
@@ -1034,6 +1040,13 @@ h2 {
   background: var(--teal-strong);
 }
 
+.extract-flow-submit:disabled {
+  background: #b8c8c8;
+  color: #f5f8f8;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
 .extract-flow-body {
   display: grid;
   height: calc(100vh - 74px);
@@ -1043,7 +1056,7 @@ h2 {
 
 .extract-file-list {
   display: grid;
-  grid-template-rows: 50px min-content;
+  grid-template-rows: 50px minmax(0, 1fr);
   border-right: 1px solid #dbe4e5;
   background: #ffffff;
 }
@@ -1094,14 +1107,23 @@ h2 {
   z-index: 1;
 }
 
-.extract-file-list > button {
+.extract-file-items {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.extract-file-items > button {
   display: grid;
-  min-height: 44px;
+  min-height: 62px;
   grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto;
   gap: 6px;
   align-items: center;
   padding: 0 10px;
   border: 0;
+  border-bottom: 1px solid #eff3f4;
   background: transparent;
   color: var(--teal-strong);
   font-size: 0.86rem;
@@ -1110,7 +1132,7 @@ h2 {
   cursor: pointer;
 }
 
-.extract-file-list > button.active {
+.extract-file-items > button.active {
   background: #eef9f7;
 }
 
@@ -1118,6 +1140,31 @@ h2 {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.extract-file-status {
+  grid-column: 2;
+  justify-self: start;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  color: #718082;
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.extract-file-status.active {
+  color: #4c8d88;
+}
+
+.extract-file-status.done {
+  color: var(--teal-strong);
+}
+
+.extract-file-status.error {
+  color: #dc2626;
 }
 
 .extract-preview {
@@ -1370,6 +1417,17 @@ h2 {
   font-weight: 900;
 }
 
+.extract-card-header p {
+  max-width: 260px;
+  margin: 5px 0 0;
+  overflow: hidden;
+  color: #6f7b7d;
+  font-size: 0.8rem;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .extract-back-link {
   border: 0;
   background: transparent;
@@ -1423,6 +1481,17 @@ h2 {
   color: #dc2626;
   font-size: 0.88rem;
   font-weight: 700;
+  line-height: 1.5;
+}
+
+.extract-info-banner {
+  padding: 10px 14px;
+  border: 1px solid #c6e5e1;
+  border-radius: 6px;
+  background: #eff9f8;
+  color: var(--teal-strong);
+  font-size: 0.88rem;
+  font-weight: 800;
   line-height: 1.5;
 }
 
@@ -1571,6 +1640,14 @@ h2 {
 .extract-field-actions button:active {
   background: #dff3f1;
   box-shadow: none;
+}
+
+.extract-hidden-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .extract-field-grid {
@@ -1731,6 +1808,165 @@ h2 {
   color: #b6c3c5;
   cursor: not-allowed;
   text-decoration: none;
+}
+
+.extract-field-empty {
+  display: grid;
+  gap: 6px;
+  padding: 18px 14px;
+  border: 1px dashed #b9dedd;
+  border-radius: 6px;
+  background: #f7fbfb;
+  color: var(--muted);
+  text-align: center;
+}
+
+.extract-field-empty strong {
+  color: var(--text);
+  font-size: 0.95rem;
+}
+
+.extract-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(13, 31, 34, 0.34);
+}
+
+.extract-field-picker {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(720px, calc(100vw - 48px));
+  max-height: min(720px, calc(100vh - 48px));
+  overflow: hidden;
+  border: 1px solid #cfe4e2;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 24px 70px rgba(21, 48, 51, 0.26);
+}
+
+.extract-field-picker header,
+.extract-field-picker footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px;
+  border-bottom: 1px solid #edf2f2;
+}
+
+.extract-field-picker footer {
+  justify-content: flex-end;
+  border-top: 1px solid #edf2f2;
+  border-bottom: 0;
+}
+
+.extract-field-picker h2 {
+  margin: 0 0 4px;
+  font-size: 1rem;
+}
+
+.extract-field-picker p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.extract-field-picker header button {
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 50%;
+  background: #f2f7f7;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.extract-field-picker footer button {
+  min-height: 36px;
+  padding: 0 16px;
+  border: 1px solid #c7d9d9;
+  border-radius: 5px;
+  background: #ffffff;
+  color: var(--text);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.extract-field-picker footer button.primary {
+  border-color: var(--teal);
+  background: var(--teal);
+  color: #ffffff;
+}
+
+.extract-field-picker footer button:disabled {
+  border-color: #d8e1e1;
+  background: #eef3f3;
+  color: #9ca8aa;
+  cursor: not-allowed;
+}
+
+.extract-picker-list {
+  display: grid;
+  gap: 8px;
+  overflow: auto;
+  padding: 14px 20px;
+}
+
+.extract-picker-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid #e2eeee;
+  border-radius: 6px;
+  background: #ffffff;
+  cursor: pointer;
+}
+
+.extract-picker-item:hover {
+  border-color: #b9dedd;
+  background: #f7fbfb;
+}
+
+.extract-picker-item.disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.extract-picker-item span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.extract-picker-item strong,
+.extract-picker-item small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.extract-picker-item small {
+  color: var(--muted);
+}
+
+.extract-picker-item em {
+  color: var(--teal-strong);
+  font-size: 0.78rem;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.extract-picker-state {
+  padding: 24px 20px;
+  color: var(--muted);
+  font-weight: 800;
+  text-align: center;
 }
 
 .field-edit-input {

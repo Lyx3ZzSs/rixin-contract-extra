@@ -21,6 +21,8 @@ async def _noop_pipeline(_task_id):
 
 import app.api.contract as _contract_api
 _contract_api.run_pipeline = _noop_pipeline
+_contract_api.run_ocr_pipeline = _noop_pipeline
+_contract_api.run_extraction_pipeline = _noop_pipeline
 
 from app.config import settings
 

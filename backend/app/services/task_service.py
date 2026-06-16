@@ -14,13 +14,12 @@ from app.models.task import ContractTask
 async def create_task(
     db: AsyncSession,
     contract_id: uuid.UUID,
-    task_type: str = "full_pipeline", custom_fields: list[dict] | None = None,
+    task_type: str = "full_pipeline",
 ) -> ContractTask:
     """Create a new task record for a contract."""
     task = ContractTask(
         contract_id=contract_id,
         task_type=task_type,
-        custom_fields=custom_fields,
         status="pending",
         progress=0,
     )

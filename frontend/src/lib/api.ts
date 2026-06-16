@@ -57,21 +57,29 @@ async function parseApiResponse<T>(response: Response): Promise<T> {
 // Contract upload
 // ────────────────────────────────────────────────────────────
 
-export async function uploadContract(file: File, customFields?: FieldDefinitionItem[]): Promise<UploadResponse> {
+export async function uploadContract(file: File): Promise<UploadResponse> {
   const formData = new FormData();
   formData.append("file", file);
-  if (customFields && customFields.length > 0) {
-    const fields = customFields.map(({ field_key, field_name, description, value_type }) => ({
-      field_key,
-      field_name,
-      description,
-      value_type,
-    }));
-    formData.append("custom_fields", JSON.stringify(fields));
-  }
   const response = await fetch(toApiUrl("/api/v1/contracts/upload"), {
     method: "POST",
     body: formData,
+  });
+  return parseApiResponse<UploadResponse>(response);
+}
+
+export async function prepareContract(file: File): Promise<UploadResponse> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const response = await fetch(toApiUrl("/api/v1/contracts/prepare"), {
+    method: "POST",
+    body: formData,
+  });
+  return parseApiResponse<UploadResponse>(response);
+}
+
+export async function startContractExtraction(contractId: string): Promise<UploadResponse> {
+  const response = await fetch(toApiUrl(`/api/v1/contracts/${contractId}/extract`), {
+    method: "POST",
   });
   return parseApiResponse<UploadResponse>(response);
 }

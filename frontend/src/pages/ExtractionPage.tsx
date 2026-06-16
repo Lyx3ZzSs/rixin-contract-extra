@@ -6,10 +6,18 @@ import type { PDFDocumentProxy, RenderTask } from "pdfjs-dist/types/src/pdf";
 
 import { getCurrentPageFromScroll } from "../components/pdfPageScroll";
 import type { FieldDefinitionItem } from "../lib/api";
-import { createExtractionPreview, getContractDetail, getTask, uploadContract } from "../lib/api";
+import {
+  createExtractionPreview,
+  createFieldDefinition,
+  getContractDetail,
+  getTask,
+  prepareContract,
+  startContractExtraction,
+} from "../lib/api";
+import { downloadBatchExtractionResultsWorkbook } from "../lib/excelExport";
 import { fieldDetailToExtractionFieldValue } from "../types";
 import { readExtractionFieldLibrary } from "../lib/extractionFieldLibrary";
-import type { ExtractionFieldValue } from "../types";
+import type { ExtractionFieldValue, FieldDetail, UploadResponse } from "../types";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -18,28 +26,54 @@ const PREVIEW_RENDER_SCALE = 0.9;
 const MIN_PREVIEW_ZOOM = 0.8;
 const MAX_PREVIEW_ZOOM = 1.8;
 const PREVIEW_ZOOM_STEP = 0.1;
+const MAX_BATCH_FILES = 5;
+const IMAGE_MAX_SIZE = 5 * 1024 * 1024;
+const DOCUMENT_MAX_SIZE = 60 * 1024 * 1024;
+const ALLOWED_EXTRACT_EXTENSIONS = new Set(["pdf", "doc", "docx", "png", "jpg", "jpeg", "bmp"]);
+const prepareContractCache = new WeakMap<File, Promise<UploadResponse>>();
+
+type BatchStatus = "pending" | "processing" | "completed" | "failed" | "skipped";
+
+interface BatchFileItem {
+  id: string;
+  file: File;
+  documentUrl: string;
+  upload: UploadResponse | null;
+  ocrStatus: BatchStatus;
+  ocrStage: string;
+  extractionStatus: BatchStatus;
+  extractionStage: string;
+  results: ExtractionFieldValue[] | null;
+  error: string;
+}
 
 export function ExtractionPage() {
-  const [file, setFile] = useState<File | null>(null);
-  const [documentUrl, setDocumentUrl] = useState("");
-
-  useEffect(() => {
-    if (!file || typeof URL === "undefined" || typeof URL.createObjectURL !== "function") {
-      setDocumentUrl("");
-      return undefined;
-    }
-    const url = URL.createObjectURL(file);
-    setDocumentUrl(url);
-    return () => URL.revokeObjectURL(url);
-  }, [file]);
+  const [batchItems, setBatchItems] = useState<BatchFileItem[]>([]);
+  const [uploadError, setUploadError] = useState("");
 
   function handleFilesChange(event: ChangeEvent<HTMLInputElement>) {
-    const selectedFile = event.target.files?.[0] ?? null;
-    setFile(selectedFile);
+    const selectedFiles = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    const validationError = validateBatchFiles(selectedFiles);
+    if (validationError) {
+      setUploadError(validationError);
+      return;
+    }
+
+    const nextItems = selectedFiles.map(createBatchFileItem);
+    setUploadError("");
+    setBatchItems(nextItems);
   }
 
-  if (file) {
-    return <ExtractionFieldSetup file={file} documentUrl={documentUrl} onBack={() => setFile(null)} />;
+  function returnToUpload() {
+    for (const item of batchItems) {
+      URL.revokeObjectURL(item.documentUrl);
+    }
+    setBatchItems([]);
+  }
+
+  if (batchItems.length > 0) {
+    return <ExtractionFieldSetup initialItems={batchItems} onBack={returnToUpload} />;
   }
 
   return (
@@ -76,6 +110,7 @@ export function ExtractionPage() {
           <input
             id="extract-files"
             type="file"
+            multiple
             accept=".pdf,.doc,.docx,.png,.jpg,.jpeg,.bmp,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/png,image/jpeg,image/bmp"
             aria-label="上传合同提取文件"
             onChange={handleFilesChange}
@@ -86,48 +121,79 @@ export function ExtractionPage() {
             <i>IMG</i>
           </span>
           <strong>拖拽文件上传或点击上传本地文件</strong>
-          <small>支持格式 pdf/word/png/jpg/jpeg/bmp，图片5MB以内，其他文件60MB以内</small>
+          <small>支持格式 pdf/word/png/jpg/jpeg/bmp，数量不超过5份，图片5MB以内，其他文件60MB以内</small>
         </label>
+        {uploadError && (
+          <div className="extract-error-banner extract-upload-error" role="alert">
+            {uploadError}
+          </div>
+        )}
       </form>
     </section>
   );
 }
 
 interface ExtractionFieldSetupProps {
-  file: File;
-  documentUrl: string;
+  initialItems: BatchFileItem[];
   onBack: () => void;
 }
 
-function ExtractionFieldSetup({ file, documentUrl, onBack }: ExtractionFieldSetupProps) {
-  const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
-  const isWord = /\.(doc|docx)$/i.test(file.name);
+function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProps) {
+  const [items, setItems] = useState<BatchFileItem[]>(initialItems);
+  const [activeItemId, setActiveItemId] = useState(initialItems[0]?.id ?? "");
+  const activeItem = items.find((item) => item.id === activeItemId) ?? items[0];
+  const activeFile = activeItem?.file ?? initialItems[0]?.file;
+  const isPdf = Boolean(activeFile && (activeFile.type === "application/pdf" || activeFile.name.toLowerCase().endsWith(".pdf")));
+  const isWord = Boolean(activeFile && /\.(doc|docx)$/i.test(activeFile.name));
   const [wordPreviewUrl, setWordPreviewUrl] = useState("");
   const [wordPreviewState, setWordPreviewState] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [wordPreviewError, setWordPreviewError] = useState("");
- const [fields, setFields] = useState<FieldDefinitionItem[]>([]);
+  const [fields, setFields] = useState<FieldDefinitionItem[]>([]);
+  const [libraryFields, setLibraryFields] = useState<FieldDefinitionItem[]>([]);
+  const [fieldLibraryState, setFieldLibraryState] = useState<"loading" | "ready" | "error">("loading");
+  const [fieldLibraryError, setFieldLibraryError] = useState("");
+  const [isLibraryPickerOpen, setIsLibraryPickerOpen] = useState(false);
+  const [selectedLibraryKeys, setSelectedLibraryKeys] = useState<Set<string>>(() => new Set());
+  const [fieldActionMessage, setFieldActionMessage] = useState("");
+  const importInputRef = useRef<HTMLInputElement | null>(null);
   const [semanticEnabled, setSemanticEnabled] = useState<Record<string, boolean>>({});
 
-useEffect(() => {
-  readExtractionFieldLibrary()
-     .then((items) => setFields(items.filter(f => f.required)))
-     .catch(() => {});
-}, []);
+  useEffect(() => {
+    setFieldLibraryState("loading");
+    setFieldLibraryError("");
+    readExtractionFieldLibrary()
+      .then((items) => {
+        setLibraryFields(items);
+        setFields(items.filter((f) => f.required));
+        setFieldLibraryState("ready");
+      })
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : "字段库加载失败";
+        setFieldLibraryError(message);
+        setFieldLibraryState("error");
+      });
+  }, []);
   const [isExtracting, setIsExtracting] = useState(false);
   const [extractionError, setExtractionError] = useState("");
-  const [results, setResults] = useState<ExtractionFieldValue[] | null>(null);
-  const [extractionStage, setExtractionStage] = useState("");
-  const [expandedResultIds, setExpandedResultIds] = useState<Set<string>>(() => new Set());
+  const [expandedResultKeys, setExpandedResultKeys] = useState<Set<string>>(() => new Set());
   const [currentStep, setCurrentStep] = useState<1 | 2 | 3>(2);
- const [editingFieldKey, setEditingFieldKey] = useState("");
+  const batchRunIdRef = useRef(0);
+  const ocrSyncPromiseByItemRef = useRef(new Map<string, Promise<void>>());
+  const [editingFieldKey, setEditingFieldKey] = useState("");
   const [isAddingField, setIsAddingField] = useState(false);
- const [fieldDraft, setFieldDraft] = useState<Pick<FieldDefinitionItem, "field_name" | "description">>({
+  const [fieldDraft, setFieldDraft] = useState<Pick<FieldDefinitionItem, "field_name" | "description">>({
     field_name: "",
     description: "",
   });
 
+  const updateItem = useCallback((itemId: string, patch: Partial<BatchFileItem>) => {
+    setItems((currentItems) =>
+      currentItems.map((item) => (item.id === itemId ? { ...item, ...patch } : item)),
+    );
+  }, []);
+
   useEffect(() => {
-    if (!isWord) {
+    if (!activeFile || !isWord) {
       setWordPreviewUrl("");
       setWordPreviewState("idle");
       setWordPreviewError("");
@@ -140,7 +206,7 @@ useEffect(() => {
     setWordPreviewState("loading");
     setWordPreviewError("");
 
-    createExtractionPreview(file)
+    createExtractionPreview(activeFile)
       .then((blob) => {
         if (!isCurrent) {
           return;
@@ -163,7 +229,19 @@ useEffect(() => {
         URL.revokeObjectURL(objectUrl);
       }
     };
-  }, [file, isWord]);
+  }, [activeFile, isWord]);
+
+  useEffect(() => {
+    const runId = batchRunIdRef.current + 1;
+    batchRunIdRef.current = runId;
+    ocrSyncPromiseByItemRef.current = new Map();
+    setExtractionError("");
+
+    initialItems.forEach((item) => {
+      const readyPromise = syncPreparedOcrItem(item, runId);
+      ocrSyncPromiseByItemRef.current.set(item.id, readyPromise);
+    });
+  }, [initialItems, updateItem]);
 
   async function removeField(fieldKey: string) {
     setFields((currentFields) => currentFields.filter((field) => field.field_key !== fieldKey));
@@ -195,27 +273,30 @@ useEffect(() => {
     setIsAddingField(true);
     setEditingFieldKey("");
     setFieldDraft({ field_name: "", description: "" });
+    setFieldActionMessage("");
   }
 
   async function saveNewField() {
     const name = fieldDraft.field_name.trim();
     const description = fieldDraft.description.trim();
     if (!name) return;
-    const field_key = `custom-${name.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "-").replace(/^-+|-+$/g, "")}-${Date.now().toString(36)}`;
-    setFields((prev) => [
-      ...prev,
-      {
-        id: "",
+    const field_key = createCustomFieldKey(name);
+    try {
+      const created = await createFieldDefinition({
         field_key,
         field_name: name,
         description,
         value_type: "string",
         required: false,
-        sort_order: prev.length + 1,
-        is_active: true,
-      },
-    ]);
-    cancelFieldEdit();
+        sort_order: Math.floor(Date.now() / 1000),
+      });
+      setLibraryFields((currentFields) => [...currentFields, created]);
+      setFields((prev) => [...prev, created]);
+      setFieldActionMessage(`已添加字段：${name}`);
+      cancelFieldEdit();
+    } catch (err) {
+      setFieldActionMessage(err instanceof Error ? err.message : "字段保存失败");
+    }
   }
 
  async function saveFieldEdit() {
@@ -231,9 +312,106 @@ useEffect(() => {
       const { updateFieldDefinition } = await import("../lib/api");
       await updateFieldDefinition(editingFieldKey, { field_name: nextName, description: nextDescription });
       const items = await readExtractionFieldLibrary();
-      setFields(items);
+      setLibraryFields(items);
+      setFields((currentFields) =>
+        currentFields.map((field) =>
+          field.field_key === editingFieldKey
+            ? { ...field, field_name: nextName, description: nextDescription }
+            : field,
+        ),
+      );
+      setFieldActionMessage(`已更新字段：${nextName}`);
     } catch { /* ignore */ }
     cancelFieldEdit();
+  }
+
+  async function openFieldLibraryPicker() {
+    setFieldActionMessage("");
+    setSelectedLibraryKeys(new Set());
+    setIsLibraryPickerOpen(true);
+    if (fieldLibraryState === "ready" && libraryFields.length > 0) {
+      return;
+    }
+    setFieldLibraryState("loading");
+    setFieldLibraryError("");
+    try {
+      const items = await readExtractionFieldLibrary();
+      setLibraryFields(items);
+      setFieldLibraryState("ready");
+    } catch (err) {
+      setFieldLibraryError(err instanceof Error ? err.message : "字段库加载失败");
+      setFieldLibraryState("error");
+    }
+  }
+
+  function toggleLibrarySelection(fieldKey: string) {
+    setSelectedLibraryKeys((currentKeys) => {
+      const nextKeys = new Set(currentKeys);
+      if (nextKeys.has(fieldKey)) {
+        nextKeys.delete(fieldKey);
+      } else {
+        nextKeys.add(fieldKey);
+      }
+      return nextKeys;
+    });
+  }
+
+  function confirmLibrarySelection() {
+    const existingKeys = new Set(fields.map((field) => field.field_key));
+    const selectedFields = libraryFields.filter((field) => selectedLibraryKeys.has(field.field_key) && !existingKeys.has(field.field_key));
+    if (selectedFields.length === 0) {
+      setFieldActionMessage("请选择尚未添加的字段");
+      return;
+    }
+    setFields((currentFields) => [...currentFields, ...selectedFields]);
+    setFieldActionMessage(`已从字段库添加 ${selectedFields.length} 个字段`);
+    setIsLibraryPickerOpen(false);
+    setSelectedLibraryKeys(new Set());
+  }
+
+  function startExcelImport() {
+    setFieldActionMessage("");
+    importInputRef.current?.click();
+  }
+
+  async function handleImportFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const selectedFile = event.target.files?.[0] ?? null;
+    event.target.value = "";
+    if (!selectedFile) {
+      return;
+    }
+    try {
+      const importedRows = await parseFieldImportFile(selectedFile);
+      const existingKeys = new Set([...libraryFields, ...fields].map((field) => field.field_key));
+      const importedFields: FieldDefinitionItem[] = [];
+      for (const row of importedRows) {
+        const name = row.field_name.trim();
+        if (!name) continue;
+        let fieldKey = row.field_key?.trim() || createCustomFieldKey(name);
+        while (existingKeys.has(fieldKey)) {
+          fieldKey = createCustomFieldKey(name);
+        }
+        existingKeys.add(fieldKey);
+        const created = await createFieldDefinition({
+          field_key: fieldKey,
+          field_name: name,
+          description: row.description.trim(),
+          value_type: row.value_type || "string",
+          required: false,
+          sort_order: fields.length + importedFields.length + 1,
+        });
+        importedFields.push(created);
+      }
+      if (importedFields.length === 0) {
+        setFieldActionMessage("未识别到可导入字段，请检查表头或第一列字段名称");
+        return;
+      }
+      setLibraryFields((currentFields) => [...currentFields, ...importedFields]);
+      setFields((currentFields) => [...currentFields, ...importedFields]);
+      setFieldActionMessage(`已导入 ${importedFields.length} 个字段`);
+    } catch (err) {
+      setFieldActionMessage(err instanceof Error ? err.message : "字段导入失败");
+    }
   }
 
   const stageMessages: Record<string, string> = {
@@ -243,130 +421,229 @@ useEffect(() => {
     text_extracting: "正在提取文本...",
     ocr_processing: "正在识别文字...",
     layout_analyzing: "正在分析布局...",
-    clause_splitting: "正在拆分条款...",
     field_extracting: "正在提取字段...",
     validating: "正在校验数据...",
     review_pending: "等待复核...",
     completed: "处理完成",
   };
 
+  async function waitForTaskCompletion(
+    taskId: string,
+    onStatus: (status: string) => void,
+    failureMessage: string,
+  ) {
+    const maxAttempts = 180;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      const poll = await getTask(taskId);
+      onStatus(poll.status);
+
+      if (poll.status === "completed") {
+        return;
+      }
+      if (poll.status.endsWith("_failed")) {
+        throw new Error(poll.error_message || failureMessage);
+      }
+    }
+    throw new Error("处理超时，请稍后查看结果");
+  }
+
+  function applyCurrentBatchPatch(itemId: string, runId: number, patch: Partial<BatchFileItem>) {
+    if (batchRunIdRef.current !== runId) {
+      return;
+    }
+    updateItem(itemId, patch);
+  }
+
+  function ensurePrepareStarted(file: File): Promise<UploadResponse> {
+    let uploadPromise = prepareContractCache.get(file);
+    if (!uploadPromise) {
+      uploadPromise = prepareContract(file);
+      prepareContractCache.set(file, uploadPromise);
+    }
+    return uploadPromise;
+  }
+
+  async function syncPreparedOcrItem(item: BatchFileItem, runId: number) {
+    try {
+      applyCurrentBatchPatch(item.id, runId, { ocrStatus: "processing", ocrStage: "uploaded", error: "" });
+      const uploadResult = await ensurePrepareStarted(item.file);
+      applyCurrentBatchPatch(item.id, runId, { upload: uploadResult, ocrStage: "uploaded" });
+      await waitForTaskCompletion(
+        uploadResult.task_id,
+        (status) => applyCurrentBatchPatch(item.id, runId, { ocrStage: status }),
+        "OCR预处理失败",
+      );
+      applyCurrentBatchPatch(item.id, runId, { ocrStatus: "completed", ocrStage: "completed", error: "" });
+    } catch (err) {
+      applyCurrentBatchPatch(item.id, runId, {
+        ocrStatus: "failed",
+        ocrStage: "failed",
+        error: err instanceof Error ? err.message : "OCR预处理失败",
+      });
+    }
+  }
+
+  async function extractSingleBatchItem(
+    item: BatchFileItem,
+    selectedFields: FieldDefinitionItem[],
+    onPatch: (itemId: string, patch: Partial<BatchFileItem>) => void,
+  ) {
+    if (!item.upload) {
+      onPatch(item.id, {
+        extractionStatus: "failed",
+        error: "文件预处理尚未开始，请重新选择文件",
+      });
+      return;
+    }
+
+    try {
+      onPatch(item.id, { extractionStatus: "processing", extractionStage: "field_extracting", error: "" });
+      const extractionTask = await startContractExtraction(item.upload.contract_id);
+      await waitForTaskCompletion(
+        extractionTask.task_id,
+        (status) => onPatch(item.id, { extractionStage: status }),
+        "提取失败",
+      );
+      const detail = await getContractDetail(item.upload.contract_id);
+      onPatch(item.id, {
+        extractionStatus: "completed",
+        extractionStage: "completed",
+        results: buildFieldValues(selectedFields, detail.fields),
+        error: "",
+      });
+    } catch (err) {
+      onPatch(item.id, {
+        extractionStatus: "failed",
+        extractionStage: "failed",
+        error: err instanceof Error ? err.message : "提取失败，请重试",
+      });
+    }
+  }
+
   async function handleStartExtraction() {
-    if (fields.length === 0) return;
+    if (fields.length === 0) {
+      setExtractionError("请先添加至少一个提取字段");
+      setFieldActionMessage("请先添加至少一个提取字段");
+      return;
+    }
 
     setIsExtracting(true);
     setExtractionError("");
-    setExtractionStage("file_detecting");
-    setExpandedResultIds(new Set());
+    setExpandedResultKeys(new Set());
     setCurrentStep(3);
+    setItems((currentItems) =>
+      currentItems.map((item) => ({
+        ...item,
+        extractionStatus: item.ocrStatus === "failed" ? "skipped" : "pending",
+        extractionStage: "",
+        results: null,
+        error: item.ocrStatus === "failed" ? item.error || "OCR预处理失败" : item.error,
+      })),
+    );
 
     try {
-      // Step 1: Upload file to backend
-      const customFields = fields.filter(f => !f.id);
-      const uploadResult = await uploadContract(file, customFields);
-      const contractId = uploadResult.contract_id;
-      const taskId = uploadResult.task_id;
+      await Promise.allSettled(Array.from(ocrSyncPromiseByItemRef.current.values()));
+      const currentItems = await getLatestItems();
+      const refreshedItems = await refreshOcrTaskStatuses(currentItems);
+      setItems(refreshedItems);
+      const readyItems = refreshedItems.filter((item) => item.ocrStatus === "completed" && item.upload);
 
-      // Step 2: Poll task until completed or failed
-      const maxAttempts = 180;
-      let taskComplete = false;
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-        const poll = await getTask(taskId);
-        setExtractionStage(poll.status);
-
-        if (poll.status === "completed") {
-          taskComplete = true;
-          break;
-        }
-        if (poll.status.endsWith("_failed")) {
-          throw new Error(poll.error_message || "提取失败");
-        }
+      if (readyItems.length === 0) {
+        throw new Error("没有可提取的文件，请确认 OCR 预处理完成后重试");
       }
 
-      if (!taskComplete) {
-        throw new Error("提取超时，请稍后查看结果");
-      }
-
-      // Step 3: Get extraction results from contract detail
-      const detail = await getContractDetail(contractId);
-
-      // Step 4: Build a lookup from field_key to extracted result, then map
-      // the user's field list to extraction results. Fields not found in the
-      // backend response are shown as "not_found".
-      const backendByFieldKey = new Map<string, ReturnType<typeof fieldDetailToExtractionFieldValue>>();
-      for (const bf of detail.fields) {
-        const fv = fieldDetailToExtractionFieldValue(bf);
-        if (fv.field_key) {
-          backendByFieldKey.set(fv.field_key, fv);
-        }
-      }
-
-      const allFieldValues = fields.map((fieldDef) => {
-        const matched = backendByFieldKey.get(fieldDef.field_key);
-        if (matched) {
-          return matched;
-        }
-        // No backend result for this field — report as not found
-        return {
-          field_id: "",
-          field_name: fieldDef.field_name,
-          field_key: fieldDef.field_key,
-          value: "",
-          confidence: 0,
-          source_snippet: "",
-          status: "not_found" as const,
-          extraction_method: null as null,
-        };
-      });
-
-      setResults(allFieldValues);
+      await Promise.all(readyItems.map((item) => extractSingleBatchItem(item, fields, updateItem)));
     } catch (err) {
       setExtractionError(err instanceof Error ? err.message : "提取失败，请重试");
-      setCurrentStep(2);
     } finally {
       setIsExtracting(false);
     }
   }
 
+  async function refreshOcrTaskStatuses(currentItems: BatchFileItem[]): Promise<BatchFileItem[]> {
+    return Promise.all(currentItems.map(async (item) => {
+      if (!item.upload || item.ocrStatus === "completed" || item.ocrStatus === "failed") {
+        return item;
+      }
+      try {
+        const task = await getTask(item.upload.task_id);
+        if (task.status === "completed") {
+          return { ...item, ocrStatus: "completed" as const, ocrStage: "completed", error: "" };
+        }
+        if (task.status.endsWith("_failed")) {
+          return {
+            ...item,
+            ocrStatus: "failed" as const,
+            ocrStage: task.status,
+            error: task.error_message || "OCR预处理失败",
+          };
+        }
+        return { ...item, ocrStage: task.status };
+      } catch (err) {
+        return {
+          ...item,
+          ocrStatus: "failed" as const,
+          ocrStage: "failed",
+          error: err instanceof Error ? err.message : "OCR状态刷新失败",
+        };
+      }
+    }));
+  }
+
+  async function getLatestItems(): Promise<BatchFileItem[]> {
+    return new Promise((resolve) => {
+      setItems((currentItems) => {
+        resolve(currentItems);
+        return currentItems;
+      });
+    });
+  }
+
   function returnToFieldSetup() {
-    setResults(null);
-    setExpandedResultIds(new Set());
-    setExtractionStage("");
+    setItems((currentItems) =>
+      currentItems.map((item) => ({
+        ...item,
+        extractionStatus: item.ocrStatus === "failed" ? "skipped" : "pending",
+        extractionStage: "",
+        results: null,
+      })),
+    );
+    setExpandedResultKeys(new Set());
+    setExtractionError("");
     setCurrentStep(2);
   }
 
-  function toggleResultExpansion(fieldId: string) {
-    setExpandedResultIds((currentIds) => {
-      const nextIds = new Set(currentIds);
-      if (nextIds.has(fieldId)) {
-        nextIds.delete(fieldId);
+  function toggleResultExpansion(resultKey: string) {
+    setExpandedResultKeys((currentKeys) => {
+      const nextKeys = new Set(currentKeys);
+      if (nextKeys.has(resultKey)) {
+        nextKeys.delete(resultKey);
       } else {
-        nextIds.add(fieldId);
+        nextKeys.add(resultKey);
       }
-      return nextIds;
+      return nextKeys;
     });
   }
 
   function handleExport() {
-    if (!results) return;
-    const header = "字段名称,提取值,状态\n";
-    const rows = results
-      .map(
-        (r) =>
-          `"${r.field_name}","${r.value || ""}","${r.status === "found" ? "已找到" : r.status === "not_found" ? "未找到" : "错误"}"`,
-      )
-      .join("\n");
-    const bom = "﻿";
-    const blob = new Blob([bom + header + rows], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${file.name.replace(/\.[^.]+$/, "")}_提取结果.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    if (!hasBatchResults) return;
+    downloadBatchExtractionResultsWorkbook("批量合同提取结果", fields, items.map((item) => ({
+      fileName: item.file.name,
+      status: item.extractionStatus,
+      error: item.error,
+      results: item.results,
+    })));
   }
 
   const activeFieldCount = fields.length;
+  const results = activeItem?.results ?? null;
+  const hasBatchResults = items.some((item) =>
+    item.extractionStatus === "completed" || item.extractionStatus === "failed" || item.extractionStatus === "skipped",
+  );
+  const preparingCount = items.filter((item) => item.ocrStatus === "processing" || item.ocrStatus === "pending").length;
+  const ocrCompletedCount = items.filter((item) => item.ocrStatus === "completed").length;
+  const ocrFailedCount = items.filter((item) => item.ocrStatus === "failed").length;
 
   return (
     <section className="extract-flow" aria-labelledby="extract-flow-title">
@@ -381,10 +658,10 @@ useEffect(() => {
               <span>✓</span>
               选择合同
             </li>
-            <li className={currentStep >= 2 ? (results ? "done" : "active") : ""}>
-              <span>{currentStep >= 3 && results ? "✓" : "2"}</span>
-              设置提取字段
-            </li>
+              <li className={currentStep >= 2 ? (hasBatchResults ? "done" : "active") : ""}>
+                <span>{currentStep >= 3 && hasBatchResults ? "✓" : "2"}</span>
+                设置提取字段
+              </li>
             <li className={currentStep >= 3 ? "active" : ""}>
               <span>3</span>
               数据提取
@@ -392,122 +669,184 @@ useEffect(() => {
           </ol>
         </div>
         <button
-          className="extract-flow-submit"
-          type="button"
-          onClick={results ? handleExport : handleStartExtraction}
-          disabled={isExtracting || (!results && activeFieldCount === 0)}
-        >
-          {isExtracting ? "正在提取..." : results ? "导出" : "开始提取"}
-        </button>
+            className="extract-flow-submit"
+            type="button"
+            onClick={hasBatchResults ? handleExport : handleStartExtraction}
+            disabled={isExtracting || (!hasBatchResults && activeFieldCount === 0)}
+            title={
+              !hasBatchResults && activeFieldCount === 0
+                  ? "请先添加至少一个提取字段"
+                  : undefined
+            }
+          >
+            {isExtracting ? "正在提取..." : hasBatchResults ? "导出" : "开始提取"}
+          </button>
       </header>
 
       <div className="extract-flow-body">
-        <aside className="extract-file-list" aria-label="合同文件列表">
-          <label className="extract-search">
-            <span>请输入</span>
-            <input aria-label="搜索合同文件" />
-          </label>
-          <button className="active" type="button" title={file.name}>
-            <span>1.</span>
-            <strong>{file.name}</strong>
-          </button>
-        </aside>
-
-        <main className="extract-preview" aria-label="合同预览">
-          <div className="extract-document-page">
-            {isPdf ? (
-              <FlatPdfPreview src={documentUrl} file={file} />
-            ) : isWord && wordPreviewState === "ready" && wordPreviewUrl ? (
-              <FlatPdfPreview src={wordPreviewUrl} file={file} />
-            ) : isWord ? (
-              <DocumentFallback
-                file={file}
-                message={
-                  wordPreviewState === "error"
-                    ? wordPreviewError || "Word 预览失败，请确认后端已安装 LibreOffice。"
-                    : "正在将 Word 转为 PDF 预览..."
-                }
-                isError={wordPreviewState === "error"}
-              />
-            ) : (
-              <DocumentFallback file={file} />
-            )}
-          </div>
-        </main>
-
-        <aside className="extract-field-panel" aria-label="字段列表">
-          {isExtracting && !results ? (
-            <div className="extract-card-view">
-              <div className="extract-card-header">
-                <h2>提取字段信息</h2>
-              </div>
-              <div className="extract-status-bar">
-                <span className="extract-status-spinner" aria-hidden="true" />
-                {stageMessages[extractionStage] || "正在提取合同的结构信息"}
-              </div>
-              <div className="extract-card-list">
-                {fields.map((field) => (
-                  <div className="extract-card-item" key={field.field_key}>
-                    <span className="extract-card-name">{field.field_name}</span>
-                    <span className="extract-card-value loading">提取中...</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : results ? (
-            <div className="extract-card-view">
-              <div className="extract-card-header">
-                <h2>提取字段信息</h2>
-                <button type="button" className="extract-back-link" onClick={returnToFieldSetup}>
-                  返回字段设置
+          <aside className="extract-file-list" aria-label="合同文件列表">
+            <label className="extract-search">
+              <span>请输入</span>
+              <input aria-label="搜索合同文件" />
+            </label>
+            <div className="extract-file-items">
+              {items.map((item, index) => (
+                <button
+                  className={item.id === activeItem?.id ? "active" : ""}
+                  type="button"
+                  title={item.file.name}
+                  key={item.id}
+                  onClick={() => {
+                    setActiveItemId(item.id);
+                    setExpandedResultKeys(new Set());
+                  }}
+                >
+                  <span>{index + 1}.</span>
+                  <strong>{item.file.name}</strong>
+                  <small className={`extract-file-status ${batchStatusTone(item)}`}>{batchStatusLabel(item)}</small>
                 </button>
-              </div>
-              {extractionError && (
-                <div className="extract-error-banner" role="alert">{extractionError}</div>
-              )}
-              <div className="extract-card-list">
-                {results.map((r) => {
-                  const valueText =
-                    r.status === "found" ? (r.value || "—") : r.status === "not_found" ? "未找到" : "提取失败";
-                  const isExpanded = expandedResultIds.has(r.field_id);
-                  const canExpand = r.status === "found" && isLongExtractionValue(valueText);
-                  return (
-                    <div className="extract-card-item result" key={r.field_id}>
-                      <span className="extract-card-name">
-                        {r.field_name}
-                        <small className="extract-method-badge">{extractionMethodLabel(r.extraction_method)}</small>
-                      </span>
-                      <span
-                        className={`extract-card-value${r.status === "not_found" ? " empty" : r.status === "error" ? " error" : ""}${isExpanded ? " expanded" : ""}`}
-                        title={valueText}
-                      >
-                        <span className="extract-card-value-text">{valueText}</span>
-                        {canExpand && (
-                          <button
-                            type="button"
-                            className="extract-value-toggle"
-                            aria-expanded={isExpanded}
-                            onClick={() => toggleResultExpansion(r.field_id)}
-                          >
-                            {isExpanded ? "收起" : "展开"}
-                          </button>
-                        )}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
+              ))}
             </div>
-          ) : (
+          </aside>
+
+          <main className="extract-preview" aria-label="合同预览">
+            <div className="extract-document-page">
+              {!activeItem || !activeFile ? (
+                <DocumentFallback file={initialItems[0].file} message="请选择合同文件" />
+              ) : isPdf ? (
+                <FlatPdfPreview src={activeItem.documentUrl} file={activeFile} />
+              ) : isWord && wordPreviewState === "ready" && wordPreviewUrl ? (
+                <FlatPdfPreview src={wordPreviewUrl} file={activeFile} />
+              ) : isWord ? (
+                <DocumentFallback
+                  file={activeFile}
+                  message={
+                    wordPreviewState === "error"
+                      ? wordPreviewError || "Word 预览失败，请确认后端已安装 LibreOffice。"
+                    : "正在将 Word 转为 PDF 预览..."
+                  }
+                  isError={wordPreviewState === "error"}
+                />
+              ) : (
+                <DocumentFallback file={activeFile} />
+              )}
+            </div>
+          </main>
+
+          <aside className="extract-field-panel" aria-label="字段列表">
+            {currentStep === 3 && (isExtracting || hasBatchResults) ? (
+              <div className="extract-card-view">
+                <div className="extract-card-header">
+                  <div>
+                    <h2>提取字段信息</h2>
+                    <p>{activeItem?.file.name ?? "合同文件"}</p>
+                  </div>
+                  <button type="button" className="extract-back-link" onClick={returnToFieldSetup}>
+                    返回字段设置
+                  </button>
+                </div>
+                {extractionError && (
+                  <div className="extract-error-banner" role="alert">{extractionError}</div>
+                )}
+                {activeItem?.extractionStatus === "processing" && (
+                  <div className="extract-status-bar">
+                    <span className="extract-status-spinner" aria-hidden="true" />
+                    {stageMessages[activeItem.extractionStage] || "正在处理合同..."}
+                  </div>
+                )}
+                {(activeItem?.extractionStatus === "failed" || activeItem?.extractionStatus === "skipped") && (
+                  <div className="extract-error-banner" role="alert">
+                    {activeItem.error || "该文件未完成提取"}
+                  </div>
+                )}
+                {results ? (
+                  <div className="extract-card-list">
+                    {results.map((r) => {
+                      const valueText =
+                        r.status === "found" ? (r.value || "—") : r.status === "not_found" ? "未找到" : "提取失败";
+                      const resultKey = getExtractionResultIdentity(r);
+                      const isExpanded = expandedResultKeys.has(resultKey);
+                      const canExpand = r.status === "found" && isLongExtractionValue(valueText);
+                      return (
+                        <div className="extract-card-item result" key={resultKey}>
+                          <span className="extract-card-name">
+                            {r.field_name}
+                            <small className="extract-method-badge">{extractionMethodLabel(r.extraction_method)}</small>
+                          </span>
+                          <span
+                            className={`extract-card-value${r.status === "not_found" ? " empty" : r.status === "error" ? " error" : ""}${isExpanded ? " expanded" : ""}`}
+                            title={valueText}
+                          >
+                            <span className="extract-card-value-text">{valueText}</span>
+                            {canExpand && (
+                              <button
+                                type="button"
+                                className="extract-value-toggle"
+                                aria-expanded={isExpanded}
+                                onClick={() => toggleResultExpansion(resultKey)}
+                              >
+                                {isExpanded ? "收起" : "展开"}
+                              </button>
+                            )}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : activeItem?.extractionStatus === "processing" || activeItem?.ocrStatus === "completed" ? (
+                  <div className="extract-card-list">
+                    {fields.map((field) => (
+                      <div className="extract-card-item" key={field.field_key}>
+                        <span className="extract-card-name">{field.field_name}</span>
+                        <span className="extract-card-value loading">提取中...</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : (
             <>
               <div className="extract-field-panel-head">
                 <h2>字段列表</h2>
                <div className="extract-field-actions" aria-label="字段操作">
                   <button type="button" onClick={startAddField}>+ 自定义添加</button>
-                  <button type="button">从字段库/模板添加</button>
-                  <button type="button">从Excel导入</button>
+                  <button type="button" onClick={openFieldLibraryPicker}>从字段库/模板添加</button>
+                  <button type="button" onClick={startExcelImport}>从Excel导入</button>
                 </div>
               </div>
+              <input
+                ref={importInputRef}
+                type="file"
+                accept=".csv,.tsv,.txt,.xlsx"
+                className="extract-hidden-file-input"
+                aria-label="导入字段文件"
+                onChange={handleImportFileChange}
+              />
+              {fieldLibraryState === "loading" && fields.length === 0 && (
+                <div className="extract-info-banner">正在加载字段库...</div>
+              )}
+              {fieldLibraryError && (
+                <div className="extract-error-banner" role="alert">
+                  字段库加载失败：{fieldLibraryError}
+                </div>
+              )}
+              {fieldActionMessage && (
+                <div className={fieldActionMessage.includes("失败") || fieldActionMessage.includes("请先") || fieldActionMessage.includes("未识别") ? "extract-error-banner" : "extract-info-banner"} role="status">
+                  {fieldActionMessage}
+                </div>
+              )}
+                {(preparingCount > 0 || ocrCompletedCount > 0 || ocrFailedCount > 0) && (
+                  <div className={ocrFailedCount > 0 ? "extract-info-banner" : "extract-info-banner"} role="status">
+                    {ocrCompletedCount === items.length
+                      ? "全部文件 OCR 预处理完成，点击开始提取可直接进入字段提取。"
+                      : `OCR预处理中：已完成 ${ocrCompletedCount}/${items.length}，处理中 ${preparingCount}，失败 ${ocrFailedCount}`}
+                  </div>
+                )}
+              {extractionError && (
+                <div className="extract-error-banner" role="alert">
+                  {extractionError}
+                </div>
+              )}
               <div className="extract-field-grid" role="table" aria-label="提取字段列表">
                <div className="extract-field-row header" role="row">
                  <strong role="columnheader">字段名称</strong>
@@ -618,12 +957,173 @@ useEffect(() => {
                   </div>
                 ))}
               </div>
+              {fields.length === 0 && fieldLibraryState !== "loading" && (
+                <div className="extract-field-empty">
+                  <strong>暂无提取字段</strong>
+                  <span>请自定义添加、从字段库选择，或导入字段清单后开始提取。</span>
+                </div>
+              )}
             </>
           )}
         </aside>
       </div>
+      {isLibraryPickerOpen && (
+        <div className="extract-modal-backdrop" role="presentation" onMouseDown={() => setIsLibraryPickerOpen(false)}>
+          <div
+            className="extract-field-picker"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="field-picker-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <header>
+              <div>
+                <h2 id="field-picker-title">从字段库/模板添加</h2>
+                <p>选择需要加入当前合同提取任务的字段。</p>
+              </div>
+              <button type="button" aria-label="关闭字段库" onClick={() => setIsLibraryPickerOpen(false)}>
+                ×
+              </button>
+            </header>
+            {fieldLibraryState === "loading" ? (
+              <div className="extract-picker-state">正在加载字段库...</div>
+            ) : fieldLibraryState === "error" ? (
+              <div className="extract-error-banner" role="alert">
+                字段库加载失败：{fieldLibraryError}
+              </div>
+            ) : (
+              <div className="extract-picker-list">
+                {libraryFields.length === 0 ? (
+                  <div className="extract-picker-state">字段库为空，请先在字段管理中维护字段。</div>
+                ) : (
+                  libraryFields.map((field) => {
+                    const alreadyAdded = fields.some((currentField) => currentField.field_key === field.field_key);
+                    return (
+                      <label className={alreadyAdded ? "extract-picker-item disabled" : "extract-picker-item"} key={field.field_key}>
+                        <input
+                          type="checkbox"
+                          checked={selectedLibraryKeys.has(field.field_key) || alreadyAdded}
+                          disabled={alreadyAdded}
+                          onChange={() => toggleLibrarySelection(field.field_key)}
+                        />
+                        <span>
+                          <strong>{field.field_name}</strong>
+                          <small>{field.description || "无字段描述"}</small>
+                        </span>
+                        {alreadyAdded && <em>已添加</em>}
+                      </label>
+                    );
+                  })
+                )}
+              </div>
+            )}
+            <footer>
+              <button type="button" onClick={() => setIsLibraryPickerOpen(false)}>
+                取消
+              </button>
+              <button type="button" className="primary" onClick={confirmLibrarySelection} disabled={selectedLibraryKeys.size === 0}>
+                添加选中字段
+              </button>
+            </footer>
+          </div>
+        </div>
+      )}
     </section>
   );
+}
+
+function createBatchFileItem(file: File): BatchFileItem {
+  return {
+    id: `${file.name}-${file.size}-${file.lastModified}-${Math.random().toString(36).slice(2, 8)}`,
+    file,
+    documentUrl: URL.createObjectURL(file),
+    upload: null,
+    ocrStatus: "pending",
+    ocrStage: "pending",
+    extractionStatus: "pending",
+    extractionStage: "",
+    results: null,
+    error: "",
+  };
+}
+
+function validateBatchFiles(files: File[]): string {
+  if (files.length === 0) {
+    return "";
+  }
+  if (files.length > MAX_BATCH_FILES) {
+    return `一次最多上传 ${MAX_BATCH_FILES} 份合同，请减少文件数量后重试。`;
+  }
+
+  for (const file of files) {
+    const extension = getFileExtension(file.name);
+    if (!ALLOWED_EXTRACT_EXTENSIONS.has(extension)) {
+      return `文件“${file.name}”格式不支持，请上传 pdf、word、png、jpg、jpeg 或 bmp。`;
+    }
+    const maxSize = isImageFile(file) ? IMAGE_MAX_SIZE : DOCUMENT_MAX_SIZE;
+    if (file.size > maxSize) {
+      return `文件“${file.name}”超过大小限制，图片需小于5MB，其他文件需小于60MB。`;
+    }
+  }
+
+  return "";
+}
+
+function getFileExtension(fileName: string): string {
+  return fileName.includes(".") ? fileName.split(".").pop()?.toLowerCase() ?? "" : "";
+}
+
+function isImageFile(file: File): boolean {
+  const extension = getFileExtension(file.name);
+  return ["png", "jpg", "jpeg", "bmp"].includes(extension) || file.type.startsWith("image/");
+}
+
+function batchStatusLabel(item: BatchFileItem): string {
+  if (item.extractionStatus === "completed") return "已提取";
+  if (item.extractionStatus === "failed") return "提取失败";
+  if (item.extractionStatus === "skipped") return "OCR失败";
+  if (item.extractionStatus === "processing") return "提取中";
+  if (item.ocrStatus === "completed") return "OCR完成";
+  if (item.ocrStatus === "failed") return "OCR失败";
+  if (item.ocrStatus === "processing") return "OCR中";
+  return "等待OCR";
+}
+
+function batchStatusTone(item: BatchFileItem): string {
+  if (item.extractionStatus === "failed" || item.extractionStatus === "skipped" || item.ocrStatus === "failed") {
+    return "error";
+  }
+  if (item.extractionStatus === "completed" || item.ocrStatus === "completed") {
+    return "done";
+  }
+  return "active";
+}
+
+function buildFieldValues(fields: FieldDefinitionItem[], backendFields: FieldDetail[]): ExtractionFieldValue[] {
+  const backendByFieldKey = new Map<string, ReturnType<typeof fieldDetailToExtractionFieldValue>>();
+  for (const backendField of backendFields) {
+    const fieldValue = fieldDetailToExtractionFieldValue(backendField);
+    if (fieldValue.field_key) {
+      backendByFieldKey.set(fieldValue.field_key, fieldValue);
+    }
+  }
+
+  return fields.map((fieldDef) => {
+    const matched = backendByFieldKey.get(fieldDef.field_key);
+    if (matched) {
+      return matched;
+    }
+    return {
+      field_id: "",
+      field_name: fieldDef.field_name,
+      field_key: fieldDef.field_key,
+      value: "",
+      confidence: 0,
+      source_snippet: "",
+      status: "not_found" as const,
+      extraction_method: null,
+    };
+  });
 }
 
 function extractionMethodLabel(method: ExtractionFieldValue["extraction_method"]): string {
@@ -636,8 +1136,244 @@ function extractionMethodLabel(method: ExtractionFieldValue["extraction_method"]
   return "提取";
 }
 
+function getExtractionResultIdentity(result: ExtractionFieldValue): string {
+  return result.field_key || result.field_id || result.field_name;
+}
+
 function isLongExtractionValue(value: string): boolean {
   return value.length > 72 || value.includes("\n");
+}
+
+interface ImportedFieldRow {
+  field_key?: string;
+  field_name: string;
+  description: string;
+  value_type?: string;
+}
+
+function createCustomFieldKey(name: string): string {
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return `custom-${slug || "field"}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+async function parseFieldImportFile(file: File): Promise<ImportedFieldRow[]> {
+  const fileName = file.name.toLowerCase();
+  if (fileName.endsWith(".xlsx")) {
+    return parseXlsxFieldRows(file);
+  }
+  if (fileName.endsWith(".xls")) {
+    throw new Error("暂不支持旧版 .xls，请另存为 .xlsx 或 CSV 后导入");
+  }
+  const text = await file.text();
+  return parseDelimitedFieldRows(text);
+}
+
+function parseDelimitedFieldRows(text: string): ImportedFieldRow[] {
+  const rows = parseDelimitedRows(text).filter((row) => row.some((cell) => cell.trim()));
+  if (rows.length === 0) {
+    return [];
+  }
+  return rowsToImportedFields(rows);
+}
+
+function parseDelimitedRows(text: string): string[][] {
+  const normalized = text.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const delimiter = pickDelimiter(normalized);
+  const rows: string[][] = [];
+  let current = "";
+  let row: string[] = [];
+  let inQuotes = false;
+
+  for (let index = 0; index < normalized.length; index++) {
+    const char = normalized[index];
+    const nextChar = normalized[index + 1];
+    if (char === "\"") {
+      if (inQuotes && nextChar === "\"") {
+        current += "\"";
+        index++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+    if (!inQuotes && char === delimiter) {
+      row.push(current.trim());
+      current = "";
+      continue;
+    }
+    if (!inQuotes && char === "\n") {
+      row.push(current.trim());
+      rows.push(row);
+      row = [];
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  if (current || row.length > 0) {
+    row.push(current.trim());
+    rows.push(row);
+  }
+  return rows;
+}
+
+function pickDelimiter(text: string): string {
+  const firstLine = text.split("\n").find((line) => line.trim()) || "";
+  const candidates = [",", "\t", ";"];
+  return candidates.reduce((best, candidate) =>
+    firstLine.split(candidate).length > firstLine.split(best).length ? candidate : best,
+  );
+}
+
+function rowsToImportedFields(rows: string[][]): ImportedFieldRow[] {
+  const header = rows[0].map(normalizeHeader);
+  const nameIndex = findHeaderIndex(header, ["字段名称", "字段名", "field_name", "name"]);
+  const descIndex = findHeaderIndex(header, ["字段描述", "描述", "description", "desc"]);
+  const keyIndex = findHeaderIndex(header, ["字段标识", "字段key", "field_key", "key"]);
+  const typeIndex = findHeaderIndex(header, ["值类型", "value_type", "type"]);
+  const hasHeader = nameIndex >= 0 || descIndex >= 0 || keyIndex >= 0;
+  const dataRows = hasHeader ? rows.slice(1) : rows;
+  const effectiveNameIndex = hasHeader && nameIndex >= 0 ? nameIndex : 0;
+  const effectiveDescIndex = hasHeader ? descIndex : 1;
+
+  return dataRows
+    .map((row) => ({
+      field_key: keyIndex >= 0 ? row[keyIndex]?.trim() : undefined,
+      field_name: row[effectiveNameIndex]?.trim() || "",
+      description: effectiveDescIndex >= 0 ? row[effectiveDescIndex]?.trim() || "" : "",
+      value_type: typeIndex >= 0 ? row[typeIndex]?.trim() || "string" : "string",
+    }))
+    .filter((row) => row.field_name);
+}
+
+function normalizeHeader(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, "_");
+}
+
+function findHeaderIndex(headers: string[], aliases: string[]): number {
+  const normalizedAliases = aliases.map(normalizeHeader);
+  return headers.findIndex((header) => normalizedAliases.includes(header));
+}
+
+async function parseXlsxFieldRows(file: File): Promise<ImportedFieldRow[]> {
+  const entries = await unzipXlsxEntries(await file.arrayBuffer());
+  const sheetName = Object.keys(entries)
+    .filter((name) => /^xl\/worksheets\/sheet\d+\.xml$/i.test(name))
+    .sort()[0];
+  if (!sheetName) {
+    throw new Error("未在 Excel 文件中找到工作表");
+  }
+  const sharedStrings = parseSharedStrings(entries["xl/sharedStrings.xml"]);
+  const rows = parseWorksheetRows(entries[sheetName], sharedStrings);
+  return rowsToImportedFields(rows);
+}
+
+async function unzipXlsxEntries(buffer: ArrayBuffer): Promise<Record<string, string>> {
+  const view = new DataView(buffer);
+  const decoder = new TextDecoder("utf-8");
+  let eocdOffset = -1;
+  for (let offset = view.byteLength - 22; offset >= 0; offset--) {
+    if (view.getUint32(offset, true) === 0x06054b50) {
+      eocdOffset = offset;
+      break;
+    }
+  }
+  if (eocdOffset < 0) {
+    throw new Error("Excel 文件格式无效");
+  }
+
+  const entryCount = view.getUint16(eocdOffset + 10, true);
+  let centralOffset = view.getUint32(eocdOffset + 16, true);
+  const entries: Record<string, string> = {};
+
+  for (let i = 0; i < entryCount; i++) {
+    if (view.getUint32(centralOffset, true) !== 0x02014b50) {
+      throw new Error("Excel 文件目录损坏");
+    }
+    const method = view.getUint16(centralOffset + 10, true);
+    const compressedSize = view.getUint32(centralOffset + 20, true);
+    const fileNameLength = view.getUint16(centralOffset + 28, true);
+    const extraLength = view.getUint16(centralOffset + 30, true);
+    const commentLength = view.getUint16(centralOffset + 32, true);
+    const localHeaderOffset = view.getUint32(centralOffset + 42, true);
+    const nameBytes = new Uint8Array(buffer, centralOffset + 46, fileNameLength);
+    const entryName = decoder.decode(nameBytes);
+
+    if (entryName.endsWith(".xml")) {
+      const localNameLength = view.getUint16(localHeaderOffset + 26, true);
+      const localExtraLength = view.getUint16(localHeaderOffset + 28, true);
+      const dataOffset = localHeaderOffset + 30 + localNameLength + localExtraLength;
+      const compressed = new Uint8Array(buffer, dataOffset, compressedSize);
+      const data = await inflateZipEntry(compressed, method);
+      entries[entryName] = decoder.decode(data);
+    }
+
+    centralOffset += 46 + fileNameLength + extraLength + commentLength;
+  }
+
+  return entries;
+}
+
+async function inflateZipEntry(data: Uint8Array, method: number): Promise<Uint8Array> {
+  if (method === 0) {
+    return data;
+  }
+  if (method !== 8) {
+    throw new Error("Excel 压缩格式暂不支持");
+  }
+  if (typeof DecompressionStream === "undefined") {
+    throw new Error("当前浏览器不支持直接解析 .xlsx，请另存为 CSV 后导入");
+  }
+  const dataBuffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
+  const stream = new Blob([dataBuffer]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+  const buffer = await new Response(stream).arrayBuffer();
+  return new Uint8Array(buffer);
+}
+
+function parseSharedStrings(xml: string | undefined): string[] {
+  if (!xml) {
+    return [];
+  }
+  const documentNode = new DOMParser().parseFromString(xml, "application/xml");
+  return Array.from(documentNode.getElementsByTagName("si")).map((item) =>
+    Array.from(item.getElementsByTagName("t")).map((node) => node.textContent || "").join(""),
+  );
+}
+
+function parseWorksheetRows(xml: string | undefined, sharedStrings: string[]): string[][] {
+  if (!xml) {
+    return [];
+  }
+  const documentNode = new DOMParser().parseFromString(xml, "application/xml");
+  return Array.from(documentNode.getElementsByTagName("row")).map((rowNode) => {
+    const cells: string[] = [];
+    Array.from(rowNode.getElementsByTagName("c")).forEach((cellNode) => {
+      const ref = cellNode.getAttribute("r") || "";
+      const columnIndex = columnNameToIndex(ref.replace(/\d+/g, ""));
+      const type = cellNode.getAttribute("t");
+      const rawValue = cellNode.getElementsByTagName("v")[0]?.textContent || "";
+      const inlineValue = Array.from(cellNode.getElementsByTagName("t")).map((node) => node.textContent || "").join("");
+      let value = rawValue;
+      if (type === "s") {
+        value = sharedStrings[Number(rawValue)] || "";
+      } else if (type === "inlineStr") {
+        value = inlineValue;
+      }
+      cells[columnIndex] = value.trim();
+    });
+    return cells.map((cell) => cell || "");
+  });
+}
+
+function columnNameToIndex(columnName: string): number {
+  let index = 0;
+  for (const char of columnName) {
+    index = index * 26 + char.toUpperCase().charCodeAt(0) - 64;
+  }
+  return Math.max(index - 1, 0);
 }
 
 

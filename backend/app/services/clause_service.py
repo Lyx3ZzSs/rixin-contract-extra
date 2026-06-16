@@ -406,7 +406,7 @@ async def split_and_save_clauses(
             page_end=seg.page_end,
             start_char=seg.start_char,
             end_char=seg.end_char,
-            bbox=seg.bbox.to_list() if seg.bbox else None,
+            bbox=seg.bbox.model_dump() if seg.bbox else None,
             confidence=seg.confidence,
             sort_order=index,
             level=seg.level,

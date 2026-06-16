@@ -59,6 +59,41 @@ async def test_upload_duplicate_allowed(client, sample_pdf_content, tmp_upload_d
     assert resp1.json()["data"]["contract_id"] != resp2.json()["data"]["contract_id"]
 
 
+@pytest.mark.asyncio
+async def test_prepare_contract_starts_ocr_task(client, sample_pdf_content, tmp_upload_dir):
+    resp = await client.post(
+        "/api/v1/contracts/prepare",
+        files={"file": ("prepare_test.pdf", io.BytesIO(sample_pdf_content), "application/pdf")},
+    )
+    assert resp.status_code == 201
+
+    body = resp.json()
+    assert body["code"] == 0
+    assert body["message"] == "预处理已开始"
+    data = body["data"]
+    assert "contract_id" in data
+    assert "file_id" in data
+    assert "task_id" in data
+
+    task_resp = await client.get(f"/api/v1/tasks/{data['task_id']}")
+    assert task_resp.status_code == 200
+    assert task_resp.json()["task_type"] == "ocr"
+
+
+@pytest.mark.asyncio
+async def test_extract_prepared_contract_requires_ready_ocr(client, sample_pdf_content, tmp_upload_dir):
+    prepare_resp = await client.post(
+        "/api/v1/contracts/prepare",
+        files={"file": ("not_ready.pdf", io.BytesIO(sample_pdf_content), "application/pdf")},
+    )
+    assert prepare_resp.status_code == 201
+    contract_id = prepare_resp.json()["data"]["contract_id"]
+
+    extract_resp = await client.post(f"/api/v1/contracts/{contract_id}/extract")
+    assert extract_resp.status_code == 409
+    assert "OCR" in extract_resp.json()["detail"]
+
+
 # ---- list ----
 
 @pytest.mark.asyncio

@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     llm_provider: str = "mock"
 
     # PPStructure (OCR + layout for scans/images)
-    ppstructure_url: str = "http://10.8.7.76:8081/"
+    ppstructure_url: str = "http://10.8.7.76:8081/layout-parsing"
     ocr_timeout: int = 120
 
     # LLM (Qwen3-30B-A3B, OpenAI-compatible)

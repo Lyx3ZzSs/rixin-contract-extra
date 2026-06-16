@@ -123,6 +123,24 @@ async def test_ocr_service_persists_blocks(sample_pdf_content, tmp_upload_dir):
 
 
 @pytest.mark.asyncio
+async def test_ocr_service_rejects_empty_results(monkeypatch):
+    """OCRService.process should fail when a provider returns no text."""
+    from app.services import ocr_service
+
+    class EmptyProvider:
+        def extract_detailed(self, _file_path: str, _file_type: str) -> OCRDetailedResult:
+            return OCRDetailedResult(
+                pages=[OCRPageResult(page_no=1, blocks=[])],
+                provider="empty",
+            )
+
+    monkeypatch.setattr(ocr_service, "get_ocr_provider", lambda: EmptyProvider())
+
+    with pytest.raises(ValueError, match="OCR result is empty"):
+        await OCRService.process(None, "00000000-0000-0000-0000-000000000000", "/tmp/empty.pdf", "pdf")
+
+
+@pytest.mark.asyncio
 async def test_bbox_from_list_roundtrip():
     """BBox.from_list / to_list should round-trip correctly."""
     original = [120.0, 300.0, 900.0, 340.0]
