@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Body, Depends, HTTPException, UploadFile, File, Query
-from fastapi import BackgroundTasks
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,8 +23,8 @@ from app.schemas.contract import (
 )
 from app.services import contract_service, file_service, task_service
 from app.config import settings
-from app.services.pipeline import run_extraction_pipeline, run_ocr_pipeline
 from app.models.ocr import OCRBlock
+from app.worker import notify_task_available
 
 # Max upload size in bytes (from settings)
 _MAX_FILE_SIZE = settings.max_file_size
@@ -55,7 +54,6 @@ async def _load_contract_detail(db: AsyncSession, contract_id: uuid.UUID) -> Con
 
 @router.post("/prepare", status_code=201)
 async def prepare_contract(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
 ) -> ApiResponse:
@@ -100,8 +98,7 @@ async def prepare_contract(
 
     task = await task_service.create_task(db, contract.id, task_type="ocr")
     await db.commit()
-
-    background_tasks.add_task(run_ocr_pipeline, task.id)
+    notify_task_available()
 
     return ApiResponse(
         code=0,
@@ -118,7 +115,6 @@ async def prepare_contract(
 @router.post("/{contract_id}/extract", status_code=202)
 async def extract_prepared_contract(
     contract_id: uuid.UUID,
-    background_tasks: BackgroundTasks,
     body: ExtractionStartRequest | None = Body(default=None),
     db: AsyncSession = Depends(get_db),
 ) -> ApiResponse:
@@ -146,11 +142,18 @@ async def extract_prepared_contract(
     if contract.ocr_completed_at is None or block_result.scalar_one_or_none() is None:
         raise HTTPException(status_code=409, detail="OCR结果尚未准备完成")
 
-    task = await task_service.create_task(db, contract.id, task_type="extraction")
-    await db.commit()
-
     field_specs = body.fields if body and body.fields else None
-    background_tasks.add_task(run_extraction_pipeline, task.id, field_specs)
+    task_payload = {
+        "fields": [field.model_dump(mode="json") for field in field_specs],
+    } if field_specs else None
+    task = await task_service.create_task(
+        db,
+        contract.id,
+        task_type="extraction",
+        payload=task_payload,
+    )
+    await db.commit()
+    notify_task_available()
 
     return ApiResponse(
         code=0,

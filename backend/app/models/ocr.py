@@ -37,4 +37,5 @@ class OCRBlock(Base):
 
     __table_args__ = (
         Index("ix_ocr_contract_page", "contract_id", "page_no"),
+        Index("ix_ocr_contract_page_order", "contract_id", "page_no", "sort_order"),
     )

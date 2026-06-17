@@ -134,9 +134,20 @@ export interface TaskDetail {
   contract_id: string;
   task_type: string;
   status: string;
+  stage?: string | null;
   progress: number;
   error_message: string | null;
+  error_code?: string | null;
+  attempts?: number;
+  max_attempts?: number;
+  queued_at?: string | null;
   started_at: string | null;
+  leased_at?: string | null;
+  lease_expires_at?: string | null;
+  worker_id?: string | null;
+  last_heartbeat_at?: string | null;
+  cancel_requested_at?: string | null;
+  next_run_at?: string | null;
   completed_at: string | null;
 }
 

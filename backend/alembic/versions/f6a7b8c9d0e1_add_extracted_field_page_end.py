@@ -17,8 +17,10 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column('extracted_fields', sa.Column('page_end', sa.Integer(), nullable=True))
+    with op.batch_alter_table('extracted_fields') as batch_op:
+        batch_op.add_column(sa.Column('page_end', sa.Integer(), nullable=True))
 
 
 def downgrade() -> None:
-    op.drop_column('extracted_fields', 'page_end')
+    with op.batch_alter_table('extracted_fields') as batch_op:
+        batch_op.drop_column('page_end')

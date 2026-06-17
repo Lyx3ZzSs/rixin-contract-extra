@@ -6,8 +6,8 @@ class Settings(BaseSettings):
     app_name: str = "rixin-contract-extract"
     debug: bool = False
 
-    # PostgreSQL
-    database_url: str = "postgresql+asyncpg://app:app_password@localhost:5432/contract_extract"
+    # Database (SQLite-first for local/single-machine deployment)
+    database_url: str = "sqlite+aiosqlite:///./data/contract_extract.db"
 
 
     # Provider selection

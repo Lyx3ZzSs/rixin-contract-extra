@@ -371,11 +371,17 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
 
   const stageMessages: Record<string, string> = {
     pending: "等待处理...",
+    queued: "等待任务调度...",
     uploaded: "已上传，等待开始...",
     file_detecting: "正在检测文件类型...",
     text_extracting: "正在提取文本...",
     field_extracting: "正在提取字段...",
     completed: "处理完成",
+    running: "正在处理...",
+    retrying: "等待重试...",
+    failed: "处理失败",
+    cancelled: "已取消",
+    timed_out: "处理超时",
   };
 
   async function waitForTaskCompletion(
@@ -386,12 +392,12 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
     const maxAttempts = 180;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const poll = await getTask(taskId);
-      onStatus(poll.status);
+      onStatus(poll.stage || poll.status);
 
       if (poll.status === "completed") {
         return;
       }
-      if (poll.status.endsWith("_failed")) {
+      if (poll.status === "failed" || poll.status === "cancelled" || poll.status === "timed_out" || poll.status.endsWith("_failed")) {
         throw new Error(poll.error_message || failureMessage);
       }
       await new Promise((resolve) => setTimeout(resolve, attempt < 10 ? 1000 : 2000));
@@ -576,15 +582,15 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
         if (task.status === "completed") {
           return { ...item, ocrStatus: "completed" as const, ocrStage: "completed", error: "" };
         }
-        if (task.status.endsWith("_failed")) {
+        if (task.status === "failed" || task.status === "cancelled" || task.status === "timed_out" || task.status.endsWith("_failed")) {
           return {
             ...item,
             ocrStatus: "failed" as const,
-            ocrStage: task.status,
+            ocrStage: task.stage || task.status,
             error: task.error_message || "OCR预处理失败",
           };
         }
-        return { ...item, ocrStage: task.status };
+        return { ...item, ocrStage: task.stage || task.status };
       } catch (err) {
         return {
           ...item,

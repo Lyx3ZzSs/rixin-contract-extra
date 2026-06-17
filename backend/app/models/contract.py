@@ -123,6 +123,7 @@ class ExtractedField(Base):
     contract: Mapped["Contract"] = relationship(back_populates="fields")
 
     __table_args__ = (
+        Index("ux_ef_contract_field", "contract_id", "field_key", unique=True),
         Index("ix_ef_contract_field", "contract_id", "field_key"),
         Index("ix_ef_contract_review", "contract_id", "review_status"),
     )

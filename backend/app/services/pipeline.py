@@ -1,12 +1,13 @@
 """Contract extraction pipeline.
 
-Runs after upload via FastAPI BackgroundTasks (no Celery / Redis required).
+Runs from the SQLite-backed worker queue.
 
 Status flow:
-  OCR preprocessing: file_detecting -> text_extracting -> completed
-  Field extraction: field_extracting -> completed
+  Task status: pending -> running -> completed/failed/cancelled/timed_out
+  Task stage: file_detecting -> text_extracting -> completed
+              field_extracting -> completed
 
-On failure the status becomes ``{step}_failed``.
+On failure the status becomes ``failed`` and stage records the failed step.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from app.extraction.base import FieldSpec
 from app.models.contract import Contract, ContractFile
 from app.models.task import ContractTask
 from app.services.ocr_service import OCRService
+from app.services.task_service import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -42,14 +44,29 @@ async def _update_task(
     task = result.scalar_one_or_none()
     if not task:
         return
-    task.status = status
+    terminal_statuses = {"completed", "failed", "cancelled", "timed_out"}
+    if status in terminal_statuses:
+        task.status = status
+        task.stage = status
+    elif status.endswith("_failed"):
+        task.status = "failed"
+        task.stage = status.removesuffix("_failed")
+    else:
+        task.status = "running"
+        task.stage = status
     task.progress = progress
     if error_message:
         task.error_message = error_message
-    if status != "pending" and task.started_at is None:
-        task.started_at = datetime.now(timezone.utc).replace(tzinfo=None)
-    if status == "completed" or status.endswith("_failed"):
-        task.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = utc_now()
+    if task.status != "pending" and task.started_at is None:
+        task.started_at = now
+    if task.status in terminal_statuses:
+        task.completed_at = now
+        task.worker_id = None
+        task.leased_at = None
+        task.lease_expires_at = None
+        task.last_heartbeat_at = None
+    task.updated_at = now
     await db.commit()
 
 
@@ -61,8 +78,16 @@ async def _update_contract(
     if contract:
         for k, v in kwargs.items():
             setattr(contract, k, v)
-        contract.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        contract.updated_at = utc_now()
         await db.commit()
+
+
+async def _raise_if_cancelled(db: AsyncSession, task_id: uuid.UUID) -> None:
+    result = await db.execute(select(ContractTask).where(ContractTask.id == task_id))
+    task = result.scalar_one_or_none()
+    if task and task.cancel_requested_at is not None:
+        await _update_task(db, task_id, status="cancelled", progress=task.progress)
+        raise RuntimeError("Task cancelled")
 
 
 def _extract_title(full_text: str) -> str | None:
@@ -140,13 +165,15 @@ async def _run_ocr_pipeline_inner(
         try:
             await _update_task(db, task_id, status="file_detecting", progress=5)
             await _update_contract(db, contract_id, status="processing")
+            await _raise_if_cancelled(db, task_id)
 
             await _update_task(db, task_id, status="text_extracting", progress=15)
             ocr_result = await OCRService.process(db, contract_id, contract_file.file_path, contract_file.file_type)
+            await _raise_if_cancelled(db, task_id)
 
             contract.page_count = len(ocr_result.pages)
             contract.title = _extract_title(ocr_result.full_text)
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            now = utc_now()
             contract.ocr_completed_at = now
             contract.status = "ocr_completed"
             contract.updated_at = now
@@ -157,21 +184,23 @@ async def _run_ocr_pipeline_inner(
 
         except Exception as exc:
             logger.error("OCR pipeline failed for task %s: %s", task_id, exc, exc_info=True)
-            current_status = task.status
+            current_status = task.stage or task.status
             current_progress = task.progress
             await db.rollback()
             step = current_status if current_status != "pending" else "unknown"
             try:
+                failed_status = "cancelled" if str(exc) == "Task cancelled" else f"{step}_failed"
                 await _update_task(
-                    db, task_id, status=f"{step}_failed", progress=current_progress,
+                    db, task_id, status=failed_status, progress=current_progress,
                     error_message=str(exc),
                 )
             except Exception:
                 logger.error("Failed to mark OCR task %s failed", task_id, exc_info=True)
-            try:
-                await _update_contract(db, contract_id, status="failed")
-            except Exception:
-                logger.error("Failed to mark contract %s as failed", contract_id, exc_info=True)
+            if str(exc) != "Task cancelled":
+                try:
+                    await _update_contract(db, contract_id, status="failed")
+                except Exception:
+                    logger.error("Failed to mark contract %s as failed", contract_id, exc_info=True)
             raise
 
 
@@ -192,6 +221,7 @@ async def _run_extraction_pipeline_inner(
         try:
             await _update_contract(db, contract_id, status="processing")
             await _update_task(db, task_id, status="field_extracting", progress=60)
+            await _raise_if_cancelled(db, task_id)
 
             ocr_result = await OCRService.load_result(db, contract_id)
             if ocr_result is None or not ocr_result.full_text.strip():
@@ -204,11 +234,12 @@ async def _run_extraction_pipeline_inner(
                 ocr_result.full_text,
                 field_definitions=field_definitions,
             )
+            await _raise_if_cancelled(db, task_id)
             if extraction.contract_type:
                 contract.contract_type = extraction.contract_type
                 contract.contract_type_confidence = extraction.contract_type_confidence
 
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            now = utc_now()
             contract.extraction_completed_at = now
             contract.status = "reviewing"
             contract.updated_at = now
@@ -219,19 +250,21 @@ async def _run_extraction_pipeline_inner(
 
         except Exception as exc:
             logger.error("Extraction pipeline failed for task %s: %s", task_id, exc, exc_info=True)
-            current_status = task.status
+            current_status = task.stage or task.status
             current_progress = task.progress
             await db.rollback()
             step = current_status if current_status != "pending" else "unknown"
             try:
+                failed_status = "cancelled" if str(exc) == "Task cancelled" else f"{step}_failed"
                 await _update_task(
-                    db, task_id, status=f"{step}_failed", progress=current_progress,
+                    db, task_id, status=failed_status, progress=current_progress,
                     error_message=str(exc),
                 )
             except Exception:
                 logger.error("Failed to mark extraction task %s failed", task_id, exc_info=True)
-            try:
-                await _update_contract(db, contract_id, status="failed")
-            except Exception:
-                logger.error("Failed to mark contract %s as failed", contract_id, exc_info=True)
+            if str(exc) != "Task cancelled":
+                try:
+                    await _update_contract(db, contract_id, status="failed")
+                except Exception:
+                    logger.error("Failed to mark contract %s as failed", contract_id, exc_info=True)
             raise

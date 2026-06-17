@@ -18,30 +18,36 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     # -- contract_clauses: add level, parent_id, sort_order --
-    op.add_column('contract_clauses', sa.Column('sort_order', sa.Integer(), nullable=False, server_default='0'))
-    op.add_column('contract_clauses', sa.Column('level', sa.Integer(), nullable=False, server_default='0'))
-    op.add_column('contract_clauses', sa.Column('parent_id', sa.Uuid(), nullable=True))
-    op.create_foreign_key('fk_clause_parent', 'contract_clauses', 'contract_clauses', ['parent_id'], ['id'])
+    with op.batch_alter_table('contract_clauses') as batch_op:
+        batch_op.add_column(sa.Column('sort_order', sa.Integer(), nullable=False, server_default='0'))
+        batch_op.add_column(sa.Column('level', sa.Integer(), nullable=False, server_default='0'))
+        batch_op.add_column(sa.Column('parent_id', sa.Uuid(), nullable=True))
+        batch_op.create_foreign_key('fk_clause_parent', 'contract_clauses', ['parent_id'], ['id'])
 
     # -- extracted_fields: add source tracing columns --
-    op.add_column('extracted_fields', sa.Column('source_paragraph_id', sa.Integer(), nullable=True))
-    op.add_column('extracted_fields', sa.Column('source_block_start', sa.Integer(), nullable=True))
-    op.add_column('extracted_fields', sa.Column('source_block_end', sa.Integer(), nullable=True))
+    with op.batch_alter_table('extracted_fields') as batch_op:
+        batch_op.add_column(sa.Column('source_paragraph_id', sa.Integer(), nullable=True))
+        batch_op.add_column(sa.Column('source_block_start', sa.Integer(), nullable=True))
+        batch_op.add_column(sa.Column('source_block_end', sa.Integer(), nullable=True))
 
     # -- ocr_blocks: add paragraph_id, font_size --
-    op.add_column('ocr_blocks', sa.Column('paragraph_id', sa.Integer(), nullable=True))
-    op.add_column('ocr_blocks', sa.Column('font_size', sa.Float(), nullable=True))
+    with op.batch_alter_table('ocr_blocks') as batch_op:
+        batch_op.add_column(sa.Column('paragraph_id', sa.Integer(), nullable=True))
+        batch_op.add_column(sa.Column('font_size', sa.Float(), nullable=True))
 
 
 def downgrade() -> None:
-    op.drop_column('ocr_blocks', 'font_size')
-    op.drop_column('ocr_blocks', 'paragraph_id')
+    with op.batch_alter_table('ocr_blocks') as batch_op:
+        batch_op.drop_column('font_size')
+        batch_op.drop_column('paragraph_id')
 
-    op.drop_column('extracted_fields', 'source_block_end')
-    op.drop_column('extracted_fields', 'source_block_start')
-    op.drop_column('extracted_fields', 'source_paragraph_id')
+    with op.batch_alter_table('extracted_fields') as batch_op:
+        batch_op.drop_column('source_block_end')
+        batch_op.drop_column('source_block_start')
+        batch_op.drop_column('source_paragraph_id')
 
-    op.drop_constraint('fk_clause_parent', 'contract_clauses', type_='foreignkey')
-    op.drop_column('contract_clauses', 'parent_id')
-    op.drop_column('contract_clauses', 'level')
-    op.drop_column('contract_clauses', 'sort_order')
+    with op.batch_alter_table('contract_clauses') as batch_op:
+        batch_op.drop_constraint('fk_clause_parent', type_='foreignkey')
+        batch_op.drop_column('parent_id')
+        batch_op.drop_column('level')
+        batch_op.drop_column('sort_order')

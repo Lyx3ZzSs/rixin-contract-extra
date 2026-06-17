@@ -13,14 +13,6 @@ from app.database import Base
 from app.main import app
 from app.models import *  # noqa: F401,F403
 
-# Prevent background OCR/extraction tasks from running during API-focused tests.
-async def _noop_pipeline(_task_id, *args, **kwargs):
-    return None
-
-import app.api.contract as _contract_api
-_contract_api.run_ocr_pipeline = _noop_pipeline
-_contract_api.run_extraction_pipeline = _noop_pipeline
-
 from app.config import settings
 
 # Redirect uploads to a temp dir for tests
@@ -32,7 +24,8 @@ settings.ocr_provider = "mock"
 settings.llm_provider = "mock"
 
 # Use SQLite for tests
-TEST_DATABASE_URL = "sqlite+aiosqlite:///./test.db"
+_tmp_db = Path(tempfile.mkdtemp(prefix="ctest_db_")) / "test.db"
+TEST_DATABASE_URL = f"sqlite+aiosqlite:///{_tmp_db}"
 
 test_engine = create_async_engine(TEST_DATABASE_URL, echo=False)
 test_session_factory = async_sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)

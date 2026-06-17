@@ -12,6 +12,7 @@ from app.database import get_db
 from app.models.contract import Contract
 from app.models.task import ContractTask
 from app.schemas.task import TaskDetail, TaskList
+from app.services.task_service import request_cancel_task
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -45,3 +46,14 @@ async def get_contract_tasks(
     )
     tasks = result.scalars().all()
     return TaskList(items=[TaskDetail.model_validate(t) for t in tasks])
+
+
+@router.post("/{task_id}/cancel", response_model=TaskDetail)
+async def cancel_task(
+    task_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    task = await request_cancel_task(db, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    return TaskDetail.model_validate(task)

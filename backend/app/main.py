@@ -1,5 +1,7 @@
 """FastAPI application factory."""
 
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -7,6 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.router import api_router
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 # Default field definitions for seeding
 _DEFAULT_FIELDS: list[dict] = [
@@ -68,19 +72,28 @@ async def lifespan(app: FastAPI):
                     reactivated += 1
             if added or reactivated:
                 await db.commit()
-                import logging
-                logger = logging.getLogger(__name__)
                 if added:
                     logger.info("Synced %d new field definition(s)", added)
                 if reactivated:
                     logger.info("Reactivated %d field definition(s)", reactivated)
     except Exception:
-        import logging
         logging.getLogger(__name__).error(
             "Field definition seeding failed — app will start without defaults",
             exc_info=True,
         )
-    yield
+
+    from app.worker import run_worker
+    worker_task = asyncio.create_task(run_worker())
+    app.state.task_worker_task = worker_task
+    logger.info("Embedded task worker started")
+    try:
+        yield
+    finally:
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            logger.info("Embedded task worker stopped")
 
 
 app = FastAPI(

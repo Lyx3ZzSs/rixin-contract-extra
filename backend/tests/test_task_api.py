@@ -9,6 +9,7 @@ from sqlalchemy import select
 from app.models.contract import Contract, ExtractedField
 from app.models.ocr import OCRBlock
 from app.models.task import ContractTask
+from app.services import task_service
 
 
 async def _upload(client, filename, content):
@@ -103,6 +104,7 @@ async def test_ocr_pipeline_runs_to_completion(sample_pdf_content, tmp_upload_di
         task = task_result.scalar_one()
         assert task.task_type == "ocr"
         assert task.status == "completed"
+        assert task.stage == "completed"
         assert task.progress == 100
 
         contract_result = await db.execute(select(Contract).where(Contract.id == contract_id))
@@ -174,6 +176,7 @@ async def test_extraction_pipeline_reuses_stored_ocr(sample_pdf_content, tmp_upl
         task = task_result.scalar_one()
         assert task.task_type == "extraction"
         assert task.status == "completed"
+        assert task.stage == "completed"
 
         contract_result = await db.execute(select(Contract).where(Contract.id == contract_id))
         contract = contract_result.scalar_one()
@@ -182,3 +185,164 @@ async def test_extraction_pipeline_reuses_stored_ocr(sample_pdf_content, tmp_upl
 
         fields = await db.execute(select(ExtractedField).where(ExtractedField.contract_id == contract_id))
         assert len(fields.scalars().all()) > 0
+
+
+@pytest.mark.asyncio
+async def test_queue_claims_one_task_once(sample_pdf_content, tmp_upload_dir):
+    from tests.conftest import test_session_factory
+    from app.services.file_service import save_file
+    from app.services.contract_service import create_contract
+    from app.services.task_service import claim_next_task, create_task
+    from app.models.contract import ContractFile
+
+    file_path, file_type, file_size, content_hash = save_file(
+        sample_pdf_content, "queue_claim.pdf",
+    )
+    async with test_session_factory() as db:
+        contract = await create_contract(db, content_hash=content_hash)
+        db.add(ContractFile(
+            contract_id=contract.id,
+            file_name="queue_claim.pdf",
+            file_path=file_path,
+            file_type=file_type,
+            file_size=file_size,
+            content_type="application/pdf",
+        ))
+        await db.flush()
+        task = await create_task(db, contract.id, task_type="ocr")
+        await db.commit()
+        task_id = task.id
+
+    async with test_session_factory() as db:
+        claimed = await claim_next_task(db, worker_id="worker-a")
+        assert claimed is not None
+        assert claimed.id == task_id
+        assert claimed.status == "running"
+        assert claimed.attempts == 1
+
+    async with test_session_factory() as db:
+        claimed_again = await claim_next_task(db, worker_id="worker-b")
+        assert claimed_again is None
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_task(sample_pdf_content, tmp_upload_dir):
+    from tests.conftest import test_session_factory
+    from app.services.file_service import save_file
+    from app.services.contract_service import create_contract
+    from app.services.task_service import create_task
+    from app.models.contract import ContractFile
+
+    file_path, file_type, file_size, content_hash = save_file(
+        sample_pdf_content, "cancel_task.pdf",
+    )
+    async with test_session_factory() as db:
+        contract = await create_contract(db, content_hash=content_hash)
+        db.add(ContractFile(
+            contract_id=contract.id,
+            file_name="cancel_task.pdf",
+            file_path=file_path,
+            file_type=file_type,
+            file_size=file_size,
+            content_type="application/pdf",
+        ))
+        await db.flush()
+        task = await create_task(db, contract.id, task_type="ocr")
+        await db.commit()
+        task_id = task.id
+
+    async with test_session_factory() as db:
+        cancelled = await task_service.request_cancel_task(db, task_id)
+        await db.commit()
+        assert cancelled is not None
+        assert cancelled.status == "cancelled"
+        assert cancelled.stage == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_worker_processes_queued_ocr_task(sample_pdf_content, tmp_upload_dir):
+    from tests.conftest import test_session_factory
+    from app.services.file_service import save_file
+    from app.services.contract_service import create_contract
+    from app.services.task_service import create_task
+    from app.models.contract import ContractFile
+    from app.worker import run_worker
+
+    file_path, file_type, file_size, content_hash = save_file(
+        sample_pdf_content, "worker_ocr.pdf",
+    )
+    async with test_session_factory() as db:
+        contract = await create_contract(db, content_hash=content_hash)
+        db.add(ContractFile(
+            contract_id=contract.id,
+            file_name="worker_ocr.pdf",
+            file_path=file_path,
+            file_type=file_type,
+            file_size=file_size,
+            content_type="application/pdf",
+        ))
+        await db.flush()
+        task = await create_task(db, contract.id, task_type="ocr")
+        await db.commit()
+        task_id = task.id
+
+    await run_worker(stop_after_idle=True, session_factory=test_session_factory)
+
+    async with test_session_factory() as db:
+        result = await db.execute(select(ContractTask).where(ContractTask.id == task_id))
+        task = result.scalar_one()
+        assert task.status == "completed"
+        assert task.stage == "completed"
+
+
+@pytest.mark.asyncio
+async def test_worker_wakeup_processes_task_without_poll_delay(sample_pdf_content, tmp_upload_dir):
+    from tests.conftest import test_session_factory
+    from app.services.file_service import save_file
+    from app.services.contract_service import create_contract
+    from app.services.task_service import create_task
+    from app.models.contract import ContractFile
+    from app.worker import notify_task_available, run_worker
+    import asyncio
+
+    worker_task = asyncio.create_task(
+        run_worker(poll_interval=60, session_factory=test_session_factory)
+    )
+    try:
+        await asyncio.sleep(0.05)
+        file_path, file_type, file_size, content_hash = save_file(
+            sample_pdf_content, "worker_wakeup.pdf",
+        )
+        async with test_session_factory() as db:
+            contract = await create_contract(db, content_hash=content_hash)
+            db.add(ContractFile(
+                contract_id=contract.id,
+                file_name="worker_wakeup.pdf",
+                file_path=file_path,
+                file_type=file_type,
+                file_size=file_size,
+                content_type="application/pdf",
+            ))
+            await db.flush()
+            task = await create_task(db, contract.id, task_type="ocr")
+            await db.commit()
+            task_id = task.id
+
+        notify_task_available()
+
+        for _ in range(30):
+            async with test_session_factory() as db:
+                result = await db.execute(select(ContractTask).where(ContractTask.id == task_id))
+                task = result.scalar_one()
+                if task.status == "completed":
+                    break
+            await asyncio.sleep(0.1)
+
+        async with test_session_factory() as db:
+            result = await db.execute(select(ContractTask).where(ContractTask.id == task_id))
+            task = result.scalar_one()
+            assert task.status == "completed"
+    finally:
+        worker_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker_task

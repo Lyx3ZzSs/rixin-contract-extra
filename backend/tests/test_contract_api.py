@@ -117,12 +117,11 @@ async def test_extract_prepared_contract_passes_selected_fields(
     client,
     sample_pdf_content,
     tmp_upload_dir,
-    monkeypatch,
 ):
     from tests.conftest import test_session_factory
-    import app.api.contract as contract_api
     from app.models.contract import Contract
     from app.models.ocr import OCRBlock
+    from app.models.task import ContractTask
 
     prepare_resp = await client.post(
         "/api/v1/contracts/prepare",
@@ -148,15 +147,6 @@ async def test_extract_prepared_contract_passes_selected_fields(
         ))
         await db.commit()
 
-    captured: dict = {}
-
-    async def capture_pipeline(task_id, field_definitions=None, *args, **kwargs):
-        captured["task_id"] = task_id
-        captured["field_definitions"] = field_definitions
-        return None
-
-    monkeypatch.setattr(contract_api, "run_extraction_pipeline", capture_pipeline)
-
     extract_resp = await client.post(
         f"/api/v1/contracts/{contract_id}/extract",
         json={
@@ -172,10 +162,16 @@ async def test_extract_prepared_contract_passes_selected_fields(
     )
 
     assert extract_resp.status_code == 202
-    assert captured["task_id"]
-    assert len(captured["field_definitions"]) == 1
-    assert captured["field_definitions"][0].field_key == "party-a-name"
-    assert captured["field_definitions"][0].field_name == "甲方名称"
+    task_id = uuid.UUID(extract_resp.json()["data"]["task_id"])
+    async with test_session_factory() as db:
+        result = await db.execute(select(ContractTask).where(ContractTask.id == task_id))
+        task = result.scalar_one()
+        assert task.status == "pending"
+        assert task.stage == "queued"
+        assert task.task_payload is not None
+        assert len(task.task_payload["fields"]) == 1
+        assert task.task_payload["fields"][0]["field_key"] == "party-a-name"
+        assert task.task_payload["fields"][0]["field_name"] == "甲方名称"
 
 
 # ---- list ----

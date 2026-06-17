@@ -8,7 +8,6 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import JSONB
 
 
 revision: str = '520bece3496b'
@@ -42,7 +41,7 @@ def upgrade() -> None:
     sa.Column('clause_title', sa.String(length=500), nullable=True),
     sa.Column('content', sa.Text(), nullable=False),
     sa.Column('page_no', sa.Integer(), nullable=True),
-    sa.Column('bbox', JSONB(), nullable=True),
+    sa.Column('bbox', sa.JSON(), nullable=True),
     sa.Column('start_char', sa.Integer(), nullable=True),
     sa.Column('end_char', sa.Integer(), nullable=True),
     sa.Column('confidence', sa.Float(), nullable=True),
@@ -95,7 +94,7 @@ def upgrade() -> None:
     sa.Column('value_type', sa.String(length=20), nullable=False),
     sa.Column('source_text', sa.Text(), nullable=True),
     sa.Column('page_no', sa.Integer(), nullable=True),
-    sa.Column('bbox', JSONB(), nullable=True),
+    sa.Column('bbox', sa.JSON(), nullable=True),
     sa.Column('confidence', sa.Float(), nullable=True),
     sa.Column('review_status', sa.String(length=20), nullable=False),
     sa.Column('reviewed_value', sa.Text(), nullable=True),
@@ -116,7 +115,7 @@ def upgrade() -> None:
     sa.Column('block_type', sa.String(length=30), nullable=False, comment='text / title / table / figure / list'),
     sa.Column('text', sa.Text(), nullable=False),
     sa.Column('confidence', sa.Float(), nullable=True),
-    sa.Column('bbox', JSONB(), nullable=True),
+    sa.Column('bbox', sa.JSON(), nullable=True),
     sa.Column('page_width', sa.Integer(), nullable=True),
     sa.Column('page_height', sa.Integer(), nullable=True),
     sa.Column('sort_order', sa.Integer(), nullable=False, server_default='0'),
