@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
-from fastapi import APIRouter, Body, Depends, HTTPException, UploadFile, File, Query, Response
+from fastapi import APIRouter, Body, Depends, HTTPException, UploadFile, File, Query
 from fastapi import BackgroundTasks
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -23,12 +24,11 @@ from app.schemas.contract import (
 )
 from app.services import contract_service, file_service, task_service
 from app.config import settings
-from app.services.pipeline import run_extraction_pipeline, run_ocr_pipeline, run_pipeline
+from app.services.pipeline import run_extraction_pipeline, run_ocr_pipeline
 from app.models.ocr import OCRBlock
 
 # Max upload size in bytes (from settings)
 _MAX_FILE_SIZE = settings.max_file_size
-_ALLOWED_TYPES = {"pdf", "docx", "png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif"}
 
 
 router = APIRouter(prefix="/contracts", tags=["contracts"])
@@ -51,80 +51,6 @@ async def _load_contract_detail(db: AsyncSession, contract_id: uuid.UUID) -> Con
     )
     result = await db.execute(stmt)
     return result.scalar_one_or_none()
-
-
-@router.post("/upload", status_code=201)
-async def upload_contract(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
-    db: AsyncSession = Depends(get_db),
-) -> ApiResponse:
-    # 1. Basic validation
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="文件名不能为空")
-
-    # 2. Read file content
-    file_data = await file.read()
-    if len(file_data) == 0:
-        raise HTTPException(status_code=400, detail="上传文件为空")
-    if len(file_data) > _MAX_FILE_SIZE:
-        raise HTTPException(status_code=400, detail=f"文件大小超过限制 ({_MAX_FILE_SIZE // (1024*1024)} MB)")
-
-    content_type = file.content_type or "application/octet-stream"
-
-    # 3. Save file to local disk
-    try:
-        file_path, file_type, file_size, content_hash = file_service.save_file(
-            file_data, file.filename,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except OSError as e:
-        raise HTTPException(status_code=500, detail=f"文件保存失败: {e}")
-
-    # 4. Create contract record
-    try:
-        contract = await contract_service.create_contract(
-            db, content_hash=content_hash,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    # 5. Create file record
-    contract_file = ContractFile(
-        contract_id=contract.id,
-        file_name=file.filename,
-        file_path=file_path,
-        file_type=file_type,
-        file_size=file_size,
-        content_type=content_type,
-    )
-    db.add(contract_file)
-    await db.flush()
-
-    # 6. Create task record
-    task = await task_service.create_task(db, contract.id, task_type="full_pipeline")
-
-    # 7. Commit so the task/contract/file rows are durable BEFORE the
-    #    background pipeline reads them. run_pipeline opens an independent
-    #    DB connection and cannot see flushed-but-uncommitted rows under
-    #    PostgreSQL's READ COMMITTED isolation; a flush() alone is not enough.
-    await db.commit()
-
-    # 8. Run extraction pipeline in the background (after the response is sent)
-    background_tasks.add_task(run_pipeline, task.id)
-
-    # 9. Return unified response
-    return ApiResponse(
-        code=0,
-        message="上传成功",
-        data=UploadResponse(
-            contract_id=contract.id,
-            file_id=contract_file.id,
-            task_id=task.id,
-            status=contract.status,
-        ),
-    )
 
 
 @router.post("/prepare", status_code=201)
@@ -332,81 +258,6 @@ async def reject_contract(
 
 
 # ---------------------------------------------------------------------------
-# Word to PDF preview endpoint
-# ---------------------------------------------------------------------------
-
-import subprocess
-import tempfile
-from pathlib import Path as _Path
-
-
-@router.post("/preview")
-async def preview_contract_file(
-    file: UploadFile = File(...),
-) -> Response:
-    """Convert an uploaded Word file to PDF and return the PDF blob."""
-    ext = file.filename.rsplit(".", 1)[-1].lower() if file.filename and "." in file.filename else ""
-    if ext not in ("doc", "docx"):
-        raise HTTPException(
-            status_code=400,
-            detail="预览仅支持 Word 文件（.doc/.docx）",
-        )
-
-    file_data = await file.read()
-    if len(file_data) == 0:
-        raise HTTPException(status_code=400, detail="上传文件为空")
-    if len(file_data) > _MAX_FILE_SIZE:
-        raise HTTPException(status_code=400, detail=f"文件大小超过限制 ({_MAX_FILE_SIZE // (1024*1024)} MB)")
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        doc_path = _Path(tmpdir) / file.filename
-        doc_path.write_bytes(file_data)
-
-        try:
-            proc = subprocess.run(
-                [
-                    "libreoffice",
-                    "--headless",
-                    "--convert-to", "pdf",
-                    "--outdir", tmpdir,
-                    str(doc_path),
-                ],
-                capture_output=True,
-                timeout=60,
-            )
-        except FileNotFoundError:
-            raise HTTPException(
-                status_code=500,
-                detail="服务器未安装 LibreOffice，无法预览 Word 文件",
-            )
-        except subprocess.TimeoutExpired:
-            raise HTTPException(
-                status_code=500,
-                detail="Word 转 PDF 超时，请重试",
-            )
-
-        if proc.returncode != 0:
-            detail = proc.stderr.decode(errors="replace").strip() or proc.stdout.decode(errors="replace").strip()
-            raise HTTPException(
-                status_code=500,
-                detail=f"Word 转 PDF 失败: {detail}",
-            )
-
-        pdf_path = _Path(tmpdir) / f"{doc_path.stem}.pdf"
-        if not pdf_path.exists():
-            candidates = list(_Path(tmpdir).glob("*.pdf"))
-            if not candidates:
-                raise HTTPException(
-                    status_code=500,
-                    detail="Word 转 PDF 失败：未生成 PDF 文件",
-                )
-            pdf_path = candidates[0]
-
-        pdf_bytes = pdf_path.read_bytes()
-        return Response(content=pdf_bytes, media_type="application/pdf")
-
-
-# ---------------------------------------------------------------------------
 # File download endpoint
 # ---------------------------------------------------------------------------
 
@@ -431,7 +282,7 @@ async def download_contract_file(
         raise HTTPException(404, "Contract file not found")
 
     file_path = contract_file.file_path
-    if not file_path or not _Path(file_path).exists():
+    if not file_path or not Path(file_path).exists():
         raise HTTPException(404, "File not found on disk")
 
     return _FileResponse(

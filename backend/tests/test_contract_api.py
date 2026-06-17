@@ -3,30 +3,29 @@
 import io
 import uuid
 from datetime import datetime, timezone
-from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
 
 
-def _upload(client, filename, content):
-    """Helper: POST upload and return raw response."""
+def _prepare(client, filename, content):
+    """Helper: POST prepare and return raw response."""
     return client.post(
-        "/api/v1/contracts/upload",
+        "/api/v1/contracts/prepare",
         files={"file": (filename, io.BytesIO(content), "application/pdf")},
     )
 
 
-# ---- upload ----
+# ---- prepare ----
 
 @pytest.mark.asyncio
-async def test_upload_contract(client, sample_pdf_content, tmp_upload_dir):
-    resp = await _upload(client, "test_contract.pdf", sample_pdf_content)
+async def test_prepare_contract(client, sample_pdf_content, tmp_upload_dir):
+    resp = await _prepare(client, "test_contract.pdf", sample_pdf_content)
     assert resp.status_code == 201
 
     body = resp.json()
     assert body["code"] == 0
-    assert body["message"] == "上传成功"
+    assert body["message"] == "预处理已开始"
     data = body["data"]
     assert "contract_id" in data
     assert "file_id" in data
@@ -35,16 +34,32 @@ async def test_upload_contract(client, sample_pdf_content, tmp_upload_dir):
 
 
 @pytest.mark.asyncio
-async def test_upload_empty_file(client):
-    resp = await _upload(client, "empty.pdf", b"")
+async def test_prepare_empty_file(client):
+    resp = await _prepare(client, "empty.pdf", b"")
     assert resp.status_code == 400
     assert "为空" in resp.json()["detail"]
 
 
 @pytest.mark.asyncio
-async def test_upload_no_filename(client, sample_pdf_content):
+async def test_prepare_docx_rejected(client):
     resp = await client.post(
-        "/api/v1/contracts/upload",
+        "/api/v1/contracts/prepare",
+        files={
+            "file": (
+                "contract.docx",
+                io.BytesIO(b"PK\x03\x04fake-docx-content"),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ),
+        },
+    )
+    assert resp.status_code == 400
+    assert "不支持" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_no_filename(client, sample_pdf_content):
+    resp = await client.post(
+        "/api/v1/contracts/prepare",
         files={"file": (None, io.BytesIO(sample_pdf_content), "application/pdf")},
     )
     # FastAPI returns 422 for missing filename
@@ -52,12 +67,12 @@ async def test_upload_no_filename(client, sample_pdf_content):
 
 
 @pytest.mark.asyncio
-async def test_upload_duplicate_allowed(client, sample_pdf_content, tmp_upload_dir):
-    """Duplicate uploads are permitted (no dedup); each gets a new contract."""
-    resp1 = await _upload(client, "dup.pdf", sample_pdf_content)
+async def test_prepare_duplicate_allowed(client, sample_pdf_content, tmp_upload_dir):
+    """Duplicate prepares are permitted (no dedup); each gets a new contract."""
+    resp1 = await _prepare(client, "dup.pdf", sample_pdf_content)
     assert resp1.status_code == 201
 
-    resp2 = await _upload(client, "dup.pdf", sample_pdf_content)
+    resp2 = await _prepare(client, "dup.pdf", sample_pdf_content)
     assert resp2.status_code == 201
     assert resp1.json()["data"]["contract_id"] != resp2.json()["data"]["contract_id"]
 
@@ -167,7 +182,7 @@ async def test_extract_prepared_contract_passes_selected_fields(
 
 @pytest.mark.asyncio
 async def test_list_contracts(client, sample_pdf_content, tmp_upload_dir):
-    await _upload(client, "list_test.pdf", sample_pdf_content)
+    await _prepare(client, "list_test.pdf", sample_pdf_content)
 
     response = await client.get("/api/v1/contracts")
     assert response.status_code == 200
@@ -180,7 +195,7 @@ async def test_list_contracts(client, sample_pdf_content, tmp_upload_dir):
 
 @pytest.mark.asyncio
 async def test_get_contract_detail(client, sample_pdf_content, tmp_upload_dir):
-    upload_resp = await _upload(client, "detail_test.pdf", sample_pdf_content)
+    upload_resp = await _prepare(client, "detail_test.pdf", sample_pdf_content)
     contract_id = upload_resp.json()["data"]["contract_id"]
 
     response = await client.get(f"/api/v1/contracts/{contract_id}")

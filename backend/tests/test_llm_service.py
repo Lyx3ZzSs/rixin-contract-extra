@@ -4,8 +4,6 @@ import json
 import pytest
 
 from app.extraction.base import (
-    BBox,
-    ClauseSegment,
     FieldSpec,
     ExtractedField,
     ExtractionResult,
@@ -95,21 +93,47 @@ class TestRawExtractionResult:
             ],
             "contract_type": "service",
             "contract_type_confidence": 0.88,
-            "key_clauses": [
-                {
-                    "clause_type": "payment",
-                    "clause_title": "付款条款",
-                    "content": "分三期支付。",
-                    "confidence": 0.85,
-                },
-            ],
         }
         result = RawExtractionResult.model_validate(data)
         assert result.contract_type == "service"
-        assert len(result.key_clauses) == 1
         field = result.fields[0]
         assert field.source_bbox == [100, 200, 500, 240]
         assert field.source_page == 2
+
+    def test_top_level_field_key_map_is_converted_to_fields(self):
+        data = {
+            "party-a-name": {
+                "field_name": "甲方名称",
+                "field_value": "江苏东大金智信息系统有限公司",
+                "source_text": "甲方：江苏东大金智信息系统有限公司",
+                "source_page": 2,
+                "confidence": 0.98,
+            },
+            "party-b-name": {
+                "field_key": "party-b-name",
+                "field_name": "乙方名称",
+                "field_value": "国能日新科技股份有限公司",
+                "source_text": "乙方：国能日新科技股份有限公司",
+                "source_page": 2,
+                "confidence": 0.98,
+            },
+            "contract_type": "采购合同",
+        }
+
+        result = RawExtractionResult.model_validate(data)
+
+        assert [field.field_key for field in result.fields] == ["party-a-name", "party-b-name"]
+        assert result.fields[0].field_value == "江苏东大金智信息系统有限公司"
+        assert result.fields[1].field_value == "国能日新科技股份有限公司"
+        assert result.contract_type == "采购合同"
+
+    def test_raw_field_accepts_value_alias(self):
+        result = RawExtractedField.model_validate({
+            "field_key": "party-a-name",
+            "value": "测试公司",
+        })
+
+        assert result.field_value == "测试公司"
 
 
 # ---------------------------------------------------------------------------
@@ -231,12 +255,9 @@ class TestLLMServiceExtract:
         for f in result.fields:
             assert 0.0 <= f.confidence <= 1.0, f"Invalid confidence for {f.field_key}"
 
-    async def test_key_clauses_returned(self):
+    async def test_key_clauses_not_returned_by_field_extraction(self):
         result = await LLMService.extract_fields_from_text("测试合同")
-        assert len(result.key_clauses) >= 3
-        for clause in result.key_clauses:
-            assert clause.clause_title
-            assert clause.content
+        assert result.key_clauses == []
 
     async def test_empty_text_returns_result(self):
         result = await LLMService.extract_fields_from_text("")
@@ -265,7 +286,6 @@ class TestLLMServiceParseRawJson:
             ],
             "contract_type": "service",
             "contract_type_confidence": 0.9,
-            "key_clauses": [],
         })
         result = LLMService._parse_raw_json(json_text, None)
         assert isinstance(result, ExtractionResult)
@@ -320,6 +340,20 @@ class TestLLMServiceParseRawJson:
         result = LLMService._parse_raw_json(json_text, None)
         assert result.fields[0].value_type == "string"
 
+    def test_top_level_field_key_map_json_is_parsed(self):
+        json_text = json.dumps({
+            "party-a-name": {
+                "field_name": "甲方名称",
+                "field_value": "测试公司",
+            },
+        })
+
+        result = LLMService._parse_raw_json(json_text, None)
+
+        assert len(result.fields) == 1
+        assert result.fields[0].field_key == "party-a-name"
+        assert result.fields[0].value == "测试公司"
+
 
 # ---------------------------------------------------------------------------
 # Raw field conversion tests
@@ -365,24 +399,3 @@ class TestRawFieldConversion:
         ]
         fields = LLMService._convert_raw_fields(raw)
         assert fields[0].value is None
-
-    def test_convert_raw_clauses(self):
-        raw_clauses = [
-            {
-                "clause_type": "payment",
-                "clause_title": "付款条款",
-                "content": "分三期支付。",
-                "confidence": 0.9,
-            },
-        ]
-        clauses = LLMService._convert_raw_clauses(raw_clauses)
-        assert len(clauses) == 1
-        assert clauses[0].clause_type == "payment"
-        assert clauses[0].clause_title == "付款条款"
-        assert clauses[0].content == "分三期支付。"
-
-    def test_convert_raw_clauses_minimal(self):
-        raw_clauses = [{"clause_title": "条款", "content": "内容"}]
-        clauses = LLMService._convert_raw_clauses(raw_clauses)
-        assert clauses[0].clause_type is None
-        assert clauses[0].confidence == 0.8  # default

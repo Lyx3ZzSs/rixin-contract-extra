@@ -7,9 +7,9 @@ import pytest
 
 
 async def _upload(client, filename, content):
-    """Helper: POST upload and return response."""
+    """Helper: create a prepared contract and return response."""
     return await client.post(
-        "/api/v1/contracts/upload",
+        "/api/v1/contracts/prepare",
         files={"file": (filename, io.BytesIO(content), "application/pdf")},
     )
 

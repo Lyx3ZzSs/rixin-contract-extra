@@ -4,7 +4,6 @@ import type {
   ContractDetail,
   ContractList,
   ExtractionRecordSummary,
-  ExtractionTaskResponse,
   TaskDetail,
   UploadResponse,
 } from "../types";
@@ -56,16 +55,6 @@ async function parseApiResponse<T>(response: Response): Promise<T> {
 // ────────────────────────────────────────────────────────────
 // Contract upload
 // ────────────────────────────────────────────────────────────
-
-export async function uploadContract(file: File): Promise<UploadResponse> {
-  const formData = new FormData();
-  formData.append("file", file);
-  const response = await fetch(toApiUrl("/api/v1/contracts/upload"), {
-    method: "POST",
-    body: formData,
-  });
-  return parseApiResponse<UploadResponse>(response);
-}
 
 export async function prepareContract(file: File): Promise<UploadResponse> {
   const formData = new FormData();
@@ -131,30 +120,6 @@ export async function listContracts(
 }
 
 // ────────────────────────────────────────────────────────────
-// Preview (Word → PDF)
-// ────────────────────────────────────────────────────────────
-
-export async function createExtractionPreview(file: File): Promise<Blob> {
-  const formData = new FormData();
-  formData.append("file", file);
-  const response = await fetch(toApiUrl("/api/v1/contracts/preview"), {
-    method: "POST",
-    body: formData,
-  });
-  if (!response.ok) {
-    let message = `预览失败 (${response.status})`;
-    try {
-      const payload = (await response.json()) as { detail?: string };
-      if (payload.detail) message = payload.detail;
-    } catch {
-      // keep status message
-    }
-    throw new Error(message);
-  }
-  return response.blob();
-}
-
-// ────────────────────────────────────────────────────────────
 // File download URL builder
 // ────────────────────────────────────────────────────────────
 
@@ -181,33 +146,10 @@ export async function getExtractionRecords(): Promise<ExtractionRecordSummary[]>
   return allItems.map(contractBriefToExtractionRecordSummary);
 }
 
-export async function getExtractionTask(taskId: string): Promise<ExtractionTaskResponse> {
+export async function getExtractionTask(taskId: string) {
   const { contractDetailToExtractionTaskResponse } = await import("../types");
-  // In the new backend, taskId is actually a contract ID
   const detail = await getContractDetail(taskId);
   return contractDetailToExtractionTaskResponse(detail);
-}
-
-// Re-extract with fields — for backward compat with ExtractionPage
-export async function extractFields(
-  file: File,
-  _fields: { id: string; name: string; type: string; description: string; semanticExtraction: boolean }[],
-): Promise<ExtractionTaskResponse & { contract_id: string }> {
-  const uploadResp = await uploadContract(file);
-  // Return a shape that ExtractionPage can consume
-  return {
-    task_id: uploadResp.task_id,
-    task_type: "full_pipeline",
-    status: "PROCESSING",
-    stage: "uploaded",
-    filename: file.name,
-    file_url: downloadContractFileUrl(uploadResp.contract_id),
-    extractor_used: "",
-    fields: [],
-    results: [],
-    errors: [],
-    contract_id: uploadResp.contract_id,
-  };
 }
 
 // ────────────────────────────────────────────────────────────

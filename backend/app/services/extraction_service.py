@@ -2,10 +2,8 @@
 
 Orchestrates:
 1. Load field definitions from DB.
-2. Contract type classification (via LLMService).
-3. Field extraction using dynamically-generated prompt (via LLMService).
-4. Field persistence (save_fields).
-5. Key clause persistence (delegates to clause_service).
+2. Field extraction using dynamically-generated prompt (via LLMService).
+3. Field persistence (save_fields).
 """
 
 from __future__ import annotations
@@ -26,6 +24,30 @@ from app.models.field_definition import FieldDefinition
 from app.services.llm_service import LLMService
 
 logger = logging.getLogger(__name__)
+
+_SUBJECT_FIELD_KEYS = {"party-a-name", "party-b-name"}
+_LOG_SNIPPET_LIMIT = 200
+
+
+def _truncate_for_log(text: str | None, limit: int = _LOG_SNIPPET_LIMIT) -> str | None:
+    if text is None:
+        return None
+    normalized = " ".join(text.split())
+    if len(normalized) <= limit:
+        return normalized
+    return f"{normalized[:limit]}..."
+
+
+def _field_summary(field: ExtractedFieldData) -> dict[str, object]:
+    return {
+        "field_key": field.field_key,
+        "field_name": field.field_name,
+        "has_value": bool(field.value),
+        "value": _truncate_for_log(field.value),
+        "confidence": field.confidence,
+        "page_no": field.page_no,
+        "source_text": _truncate_for_log(field.source_text),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -60,10 +82,8 @@ async def extract_and_save(
     """Run the full extraction pipeline for a contract.
 
     1. Load field definitions from DB.
-    2. Classify contract type.
-    3. Extract fields via LLM (using dynamic prompt).
-    4. Persist fields to DB.
-    5. Persist key clauses to DB.
+    2. Extract fields via LLM (using dynamic prompt).
+    3. Persist fields to DB.
     """
     # Step 1: Use request-scoped field definitions when provided; otherwise
     # fall back to all active DB fields for legacy/full-pipeline calls.
@@ -81,28 +101,88 @@ async def extract_and_save(
 
     # Build lookup for save_fields.
     field_map: dict[str, FieldSpec] = {fs.field_key: fs for fs in field_specs}
+    requested_keys = [fs.field_key for fs in field_specs]
 
-    contract_type, type_confidence = await LLMService.classify_contract_type(full_text)
-
-    # Step 3: Extract fields using dynamic prompt
-    result = await LLMService.extract_fields_from_text(
-        full_text, contract_type, field_definitions=field_specs,
+    logger.info(
+        "Extraction request diagnostics: contract_id=%s text_length=%d requested_fields=%s",
+        contract_id,
+        len(full_text),
+        [{"field_key": fs.field_key, "field_name": fs.field_name} for fs in field_specs],
     )
 
-    # Override type if not set in extraction result
-    if not result.contract_type:
-        result.contract_type = contract_type
-    if not result.contract_type_confidence:
-        result.contract_type_confidence = type_confidence
+    result = await LLMService.extract_fields_from_text(
+        full_text, field_definitions=field_specs,
+    )
 
-    # Step 4: Save fields
+    requested_key_set = set(requested_keys)
+    unknown_fields = [
+        field.field_key for field in result.fields
+        if field.field_key and requested_key_set and field.field_key not in requested_key_set
+    ]
+    if unknown_fields:
+        logger.warning(
+            "Extraction response diagnostics: llm_returned_unrequested_field contract_id=%s unknown_keys=%s",
+            contract_id,
+            unknown_fields,
+        )
+
+    normalized_fields = [
+        field for field in result.fields
+        if field.field_key and (not requested_key_set or field.field_key in requested_key_set)
+    ]
+    returned_by_key = {field.field_key: field for field in normalized_fields if field.field_key}
+    returned_keys = list(returned_by_key.keys())
+    missing_requested_keys = [key for key in requested_keys if key not in returned_by_key]
+
+    if requested_keys and not returned_by_key:
+        raise RuntimeError(f"LLM returned no requested fields: {requested_keys}")
+
+    for key in missing_requested_keys:
+        definition = field_map[key]
+        missing_field = ExtractedFieldData(
+            field_key=definition.field_key,
+            field_name=definition.field_name,
+            value=None,
+            value_type=definition.value_type,
+            source_text=None,
+            page_no=None,
+            confidence=0.0,
+        )
+        normalized_fields.append(missing_field)
+        returned_by_key[key] = missing_field
+
+    result.fields = normalized_fields
+    null_value_keys = [field.field_key for field in result.fields if field.field_key and not field.value]
+    non_null_keys = [field.field_key for field in result.fields if field.field_key and field.value]
+    subject_fields = {
+        key: _field_summary(field)
+        for key, field in returned_by_key.items()
+        if key in _SUBJECT_FIELD_KEYS
+    }
+
+    logger.info(
+        "Extraction response diagnostics: contract_id=%s returned_keys=%s non_null_keys=%s null_value_keys=%s subject_fields=%s",
+        contract_id,
+        returned_keys,
+        non_null_keys,
+        null_value_keys,
+        subject_fields,
+    )
+    if missing_requested_keys:
+        logger.warning(
+            "Extraction response diagnostics: llm_missing_requested_field contract_id=%s missing_keys=%s",
+            contract_id,
+            missing_requested_keys,
+        )
+    if null_value_keys:
+        logger.warning(
+            "Extraction response diagnostics: llm_returned_null contract_id=%s null_value_keys=%s",
+            contract_id,
+            null_value_keys,
+        )
+
     if result.fields:
         await save_fields(db, contract_id, result.fields, field_map)
-
-    # Step 5: Save key clauses
-    if result.key_clauses:
-        from app.services.clause_service import save_clauses
-        await save_clauses(db, contract_id, result.key_clauses)
 
     return result
 
@@ -150,4 +230,13 @@ async def save_fields(
         db.add(record)
         records.append(record)
     await db.flush()
+    saved_non_null_keys = [record.field_key for record in records if record.value]
+    saved_null_keys = [record.field_key for record in records if not record.value]
+    logger.info(
+        "Field save diagnostics: contract_id=%s saved_count=%d saved_non_null_keys=%s saved_null_keys=%s",
+        contract_id,
+        len(records),
+        saved_non_null_keys,
+        saved_null_keys,
+    )
     return records

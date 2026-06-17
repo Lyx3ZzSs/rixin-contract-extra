@@ -13,14 +13,11 @@ from app.database import Base
 from app.main import app
 from app.models import *  # noqa: F401,F403
 
-# Prevent the background pipeline from running during upload-focused tests.
-# Dedicated pipeline tests call run_pipeline() directly with an injected
-# session, so they are unaffected.
+# Prevent background OCR/extraction tasks from running during API-focused tests.
 async def _noop_pipeline(_task_id, *args, **kwargs):
     return None
 
 import app.api.contract as _contract_api
-_contract_api.run_pipeline = _noop_pipeline
 _contract_api.run_ocr_pipeline = _noop_pipeline
 _contract_api.run_extraction_pipeline = _noop_pipeline
 

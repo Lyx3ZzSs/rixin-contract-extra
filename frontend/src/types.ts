@@ -179,7 +179,7 @@ export function contractBriefToExtractionRecordSummary(
 ): ExtractionRecordSummary {
   return {
     task_id: c.id,
-    task_type: "full_pipeline",
+    task_type: "extraction",
     status: mapContractStatusToTaskStatus(c.status),
     created_at: c.created_at,
     updated_at: c.created_at,
@@ -208,7 +208,7 @@ export function contractDetailToExtractionTaskResponse(
 
   return {
     task_id: detail.id,
-    task_type: "full_pipeline",
+    task_type: "extraction",
     status: "COMPLETED",
     stage: "completed",
     filename: fileName ?? detail.files?.[0]?.file_name ?? "",

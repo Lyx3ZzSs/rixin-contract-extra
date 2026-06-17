@@ -12,7 +12,7 @@ from app.models.review import ReviewRecord
 
 async def _upload(client, filename, content):
     return await client.post(
-        "/api/v1/contracts/upload",
+        "/api/v1/contracts/prepare",
         files={"file": (filename, io.BytesIO(content), "application/pdf")},
     )
 

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from app.extraction.base import (
     BBox,
-    ClauseSegment,
     ExtractedField,
     ExtractionResult,
 )
@@ -40,13 +39,11 @@ class MockLLMProvider(LLMProvider):
     ) -> ExtractionResult:
         """Return the unified field set (kebab-case keys) plus extended fields."""
         fields = self._build_basic_fields(full_text)
-        key_clauses = self._build_key_clauses()
 
         return ExtractionResult(
             contract_type=contract_type or "service",
             contract_type_confidence=0.85,
             fields=fields,
-            key_clauses=key_clauses,
         )
 
     # ------------------------------------------------------------------
@@ -168,63 +165,5 @@ class MockLLMProvider(LLMProvider):
                 value="021-66666666", value_type="string",
                 source_text="电话：021-66666666", page_no=1,
                 confidence=0.90,
-            ),
-        ]
-
-    # ------------------------------------------------------------------
-    # Key clauses
-    # ------------------------------------------------------------------
-
-    def _build_key_clauses(self) -> list[ClauseSegment]:
-        return [
-            ClauseSegment(
-                clause_type="payment",
-                clause_title="第二条 付款方式",
-                content=(
-                    "本合同总金额为人民币1,200,000.00元，分三期支付：\n"
-                    "1. 合同签订后5个工作日内，甲方向乙方支付合同总金额的30%，即360,000.00元；\n"
-                    "2. 系统开发完成并通过验收后10个工作日内，甲方向乙方支付合同总金额的40%，即480,000.00元；\n"
-                    "3. 系统上线运行满6个月且无重大故障后10个工作日内，甲方向乙方支付合同总金额的30%，即360,000.00元。"
-                ),
-                page_no=1,
-                confidence=0.92,
-            ),
-            ClauseSegment(
-                clause_type="breach",
-                clause_title="第四条 违约责任",
-                content=(
-                    "1. 如乙方未按约定时间完成项目交付，每逾期一天，应向甲方支付合同总金额的0.1%作为违约金，"
-                    "违约金总额不超过合同总金额的10%。\n"
-                    "2. 如甲方未按约定时间支付款项，每逾期一天，应向乙方支付应付未付金额的0.05%作为滞纳金。"
-                ),
-                page_no=1,
-                confidence=0.90,
-            ),
-            ClauseSegment(
-                clause_type="confidentiality",
-                clause_title="第五条 保密条款",
-                content=(
-                    "双方应对在合作过程中知悉的对方商业秘密、技术秘密及其他保密信息承担保密义务，"
-                    "保密期限为合同终止后3年。"
-                ),
-                page_no=1,
-                confidence=0.91,
-            ),
-            ClauseSegment(
-                clause_type="termination",
-                clause_title="第九条 合同期限",
-                content="本合同自双方签字盖章之日起生效，有效期至双方义务全部履行完毕之日止。",
-                page_no=1,
-                confidence=0.88,
-            ),
-            ClauseSegment(
-                clause_type="dispute",
-                clause_title="第八条 争议解决",
-                content=(
-                    "因本合同引起的或与本合同有关的任何争议，双方应首先通过友好协商解决；"
-                    "协商不成的，任何一方均可向合同签订地有管辖权的人民法院提起诉讼。"
-                ),
-                page_no=1,
-                confidence=0.87,
             ),
         ]

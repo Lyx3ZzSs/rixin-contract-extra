@@ -127,7 +127,7 @@ def test_ppocr_aistudio_ocr_results_response(monkeypatch):
 
 def test_ppocr_whole_pdf_response_maps_pages(monkeypatch):
     provider = PPOCRProvider()
-    fallback_pages = [
+    page_templates = [
         OCRPageResult(page_no=1, width=100, height=200, blocks=[]),
         OCRPageResult(page_no=2, width=110, height=210, blocks=[]),
     ]
@@ -156,7 +156,7 @@ def test_ppocr_whole_pdf_response_maps_pages(monkeypatch):
 
     monkeypatch.setattr(PPOCRProvider, "_http_post", staticmethod(fake_post))
 
-    pages = provider._call_ppocr_pdf(b"%PDF fake", fallback_pages)
+    pages = provider._call_ppocr_pdf(b"%PDF fake", page_templates)
 
     assert [page.page_no for page in pages] == [1, 2]
     assert [page.full_text for page in pages] == ["第一页", "第二页"]
@@ -192,17 +192,6 @@ def test_ppocr_no_text_raises(monkeypatch):
         provider._call_ppocr(b"fake-image-bytes", page_no=1)
 
 
-def test_ppocr_no_text_allow_empty(monkeypatch):
-    provider = PPOCRProvider()
-
-    def fake_post(_url: str, _payload: dict, _timeout: int):
-        return _FakeResponse({"errorCode": 0, "result": []})
-
-    monkeypatch.setattr(PPOCRProvider, "_http_post", staticmethod(fake_post))
-
-    assert provider._call_ppocr(b"fake-image-bytes", page_no=1, allow_empty=True) == []
-
-
 def test_pdf_text_extraction_skips_ppocr(tmp_path, monkeypatch):
     fitz = pytest.importorskip("fitz")
     pdf_path = tmp_path / "text.pdf"
@@ -213,15 +202,24 @@ def test_pdf_text_extraction_skips_ppocr(tmp_path, monkeypatch):
     doc.close()
 
     provider = PPOCRProvider()
+    captured: dict = {}
 
     def fail_if_called(*_args, **_kwargs):
         raise AssertionError("PP-OCR should not be called for text PDF")
 
+    original_extract_text_pages = provider._extract_pdf_text_pages
+
+    def capture_text_pages(doc):
+        captured["detailed_extraction_called"] = True
+        return original_extract_text_pages(doc)
+
+    monkeypatch.setattr(provider, "_extract_pdf_text_pages", capture_text_pages)
     monkeypatch.setattr(provider, "_call_ppocr_pdf", fail_if_called)
 
     result = provider._extract_pdf(str(pdf_path))
 
     assert result.provider == "ppocr_pdf_text"
+    assert captured["detailed_extraction_called"] is True
     assert "Service contract text" in result.full_text
 
 
@@ -236,9 +234,12 @@ def test_pdf_uses_whole_pdf_ocr_for_scanned_pdf(tmp_path, monkeypatch):
     provider = PPOCRProvider()
     captured: dict = {}
 
-    def fake_whole_pdf(pdf_bytes, fallback_pages):
+    def fail_if_detailed_text_called(*_args, **_kwargs):
+        raise AssertionError("Detailed text extraction should not run for scanned PDF")
+
+    def fake_whole_pdf(pdf_bytes, page_templates):
         captured["pdf_bytes"] = pdf_bytes
-        captured["fallback_pages"] = fallback_pages
+        captured["page_templates"] = page_templates
         return [
             OCRPageResult(
                 page_no=1,
@@ -248,19 +249,20 @@ def test_pdf_uses_whole_pdf_ocr_for_scanned_pdf(tmp_path, monkeypatch):
             ),
         ]
 
+    monkeypatch.setattr(provider, "_extract_pdf_text_pages", fail_if_detailed_text_called)
     monkeypatch.setattr(provider, "_call_ppocr_pdf", fake_whole_pdf)
 
     result = provider._extract_pdf(str(pdf_path))
 
     assert result.provider == "ppocr_pdf_whole"
     assert captured["pdf_bytes"].startswith(b"%PDF")
-    assert captured["fallback_pages"][0].page_no == 1
+    assert captured["page_templates"][0].page_no == 1
     assert result.full_text == "整份OCR文本"
 
 
-def test_pdf_whole_ocr_failure_falls_back_to_page_ocr(tmp_path, monkeypatch):
+def test_pdf_whole_ocr_failure_raises_without_page_fallback(tmp_path, monkeypatch):
     fitz = pytest.importorskip("fitz")
-    pdf_path = tmp_path / "fallback.pdf"
+    pdf_path = tmp_path / "whole-failed.pdf"
     doc = fitz.open()
     doc.new_page()
     doc.new_page()
@@ -272,16 +274,37 @@ def test_pdf_whole_ocr_failure_falls_back_to_page_ocr(tmp_path, monkeypatch):
     def fail_whole_pdf(*_args, **_kwargs):
         raise RuntimeError("whole pdf unsupported")
 
-    def fake_page_ocr(_img_bytes, page_no, sort_offset=0, allow_empty=False):
-        if page_no == 1:
-            return []
-        return [OCRTextBlock(text="第二页分页OCR", confidence=0.8, sort_order=sort_offset + 1)]
+    def fail_if_page_ocr_called(*_args, **_kwargs):
+        raise AssertionError("Page OCR fallback should not run")
 
     monkeypatch.setattr(provider, "_call_ppocr_pdf", fail_whole_pdf)
-    monkeypatch.setattr(provider, "_call_ppocr", fake_page_ocr)
+    monkeypatch.setattr(provider, "_call_ppocr", fail_if_page_ocr_called)
 
-    result = provider._extract_pdf(str(pdf_path))
+    with pytest.raises(RuntimeError, match="whole pdf unsupported"):
+        provider._extract_pdf(str(pdf_path))
 
-    assert result.provider == "ppocr_pdf_page_fallback"
-    assert result.pages[0].full_text == ""
-    assert result.pages[1].full_text == "第二页分页OCR"
+
+def test_pdf_whole_ocr_empty_raises(tmp_path, monkeypatch):
+    fitz = pytest.importorskip("fitz")
+    pdf_path = tmp_path / "whole-empty.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(pdf_path)
+    doc.close()
+
+    provider = PPOCRProvider()
+
+    def fake_empty_whole_pdf(_pdf_bytes, page_templates):
+        return [
+            OCRPageResult(
+                page_no=page_templates[0].page_no,
+                width=page_templates[0].width,
+                height=page_templates[0].height,
+                blocks=[],
+            ),
+        ]
+
+    monkeypatch.setattr(provider, "_call_ppocr_pdf", fake_empty_whole_pdf)
+
+    with pytest.raises(RuntimeError, match="Whole-PDF PP-OCR returned no text blocks"):
+        provider._extract_pdf(str(pdf_path))

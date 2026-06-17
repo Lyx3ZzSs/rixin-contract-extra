@@ -1,11 +1,8 @@
 """File type identification based on magic bytes and extensions."""
 
-import mimetypes
-
 # Magic byte signatures
 SIGNATURES: dict[bytes, str] = {
     b"%PDF": "pdf",
-    b"PK\x03\x04": "docx",  # ZIP-based (docx, xlsx, etc.)
     b"\x89PNG": "png",
     b"\xff\xd8\xff": "jpg",
     b"GIF8": "gif",
@@ -14,15 +11,9 @@ SIGNATURES: dict[bytes, str] = {
     b"MM\x00*": "tiff",
 }
 
-# MIME type mappings for ZIP-based formats
-ZIP_CONTENT_TYPES: dict[str, str] = {
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
-}
-
-ALLOWED_EXTENSIONS = {"pdf", "docx", "png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif"}
+ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif"}
 ALLOWED_MIME_TYPES = {
     "application/pdf",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "image/png",
     "image/jpeg",
     "image/gif",
@@ -36,10 +27,6 @@ def identify_file_type(content: bytes, filename: str) -> str | None:
     for sig, ftype in SIGNATURES.items():
         if content[: len(sig)] == sig:
             return ftype
-
-    mime, _ = mimetypes.guess_type(filename)
-    if mime in ZIP_CONTENT_TYPES:
-        return ZIP_CONTENT_TYPES[mime]
 
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if ext in ALLOWED_EXTENSIONS:

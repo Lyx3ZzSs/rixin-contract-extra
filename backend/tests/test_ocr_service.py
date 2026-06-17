@@ -1,5 +1,7 @@
 """Tests for OCR service abstraction layer."""
 
+import logging
+
 import pytest
 
 from app.extraction.base import (
@@ -120,6 +122,52 @@ async def test_ocr_service_persists_blocks(sample_pdf_content, tmp_upload_dir):
         assert b.text
         assert isinstance(b.sort_order, int)
         assert b.sort_order > 0
+
+
+@pytest.mark.asyncio
+async def test_ocr_service_logs_subject_keyword_diagnostics(sample_pdf_content, tmp_upload_dir, caplog):
+    """OCRService.process should log subject keyword hits without full text dumps."""
+    from tests.conftest import test_session_factory
+    from app.services.file_service import save_file
+    from app.services.contract_service import create_contract
+    from app.models.contract import ContractFile
+
+    file_path, file_type, file_size, content_hash = save_file(
+        sample_pdf_content, "ocr_log_test.pdf",
+    )
+
+    caplog.set_level(logging.INFO, logger="app.services.ocr_service")
+    async with test_session_factory() as db:
+        contract = await create_contract(db, content_hash=content_hash)
+        db.add(ContractFile(
+            contract_id=contract.id,
+            file_name="ocr_log_test.pdf",
+            file_path=file_path,
+            file_type=file_type,
+            file_size=file_size,
+            content_type="application/pdf",
+        ))
+        await db.flush()
+
+        await OCRService.process(db, contract.id, file_path, file_type)
+
+    messages = [record.getMessage() for record in caplog.records]
+    diagnostics = [message for message in messages if "OCR diagnostics" in message]
+    assert diagnostics
+    assert "subject_keyword_hits" in diagnostics[-1]
+    assert "甲方" in diagnostics[-1]
+    assert "乙方" in diagnostics[-1]
+
+
+def test_ocr_log_truncate_helper_limits_text():
+    from app.services.ocr_service import _truncate_for_log
+
+    text = "甲方" + "很长" * 150
+    truncated = _truncate_for_log(text)
+
+    assert truncated is not None
+    assert len(truncated) <= 203
+    assert truncated.endswith("...")
 
 
 @pytest.mark.asyncio

@@ -3,10 +3,10 @@
 Runs after upload via FastAPI BackgroundTasks (no Celery / Redis required).
 
 Status flow:
-  uploaded -> file_detecting -> text_extracting -> ocr_processing ->
-  field_extracting -> validating -> review_pending -> completed
+  OCR preprocessing: file_detecting -> text_extracting -> completed
+  Field extraction: field_extracting -> completed
 
-On failure the status becomes ``{step}_failed`` (e.g. ``ocr_processing_failed``).
+On failure the status becomes ``{step}_failed``.
 """
 
 from __future__ import annotations
@@ -105,22 +105,6 @@ async def _load_task_contract_file(
 # Core async pipeline
 # ---------------------------------------------------------------------------
 
-async def run_pipeline(
-    task_id: uuid.UUID,
-    session_factory: async_sessionmaker | None = None,
-) -> dict:
-    """Execute the full pipeline for a given task.
-
-    Designed to run as a FastAPI BackgroundTask (awaited inside the app's
-    event loop) or to be awaited directly in tests.
-
-    When ``session_factory`` is None, the global engine from ``app.database``
-    is reused.  Tests pass their own factory pointing at the test DB.
-    """
-    sf = session_factory if session_factory is not None else async_session_factory
-    return await _run_pipeline_inner(sf, task_id)
-
-
 async def run_ocr_pipeline(
     task_id: uuid.UUID,
     session_factory: async_sessionmaker | None = None,
@@ -138,107 +122,6 @@ async def run_extraction_pipeline(
     """Run field extraction from already-persisted OCR blocks."""
     sf = session_factory if session_factory is not None else async_session_factory
     return await _run_extraction_pipeline_inner(sf, task_id, field_definitions=field_definitions)
-
-
-async def _run_pipeline_inner(
-    session_factory: async_sessionmaker,
-    task_id: uuid.UUID,
-) -> dict:
-    async with session_factory() as db:
-        # Load task & contract
-        result = await db.execute(select(ContractTask).where(ContractTask.id == task_id))
-        task = result.scalar_one_or_none()
-        if task is None:
-            # The task row isn't committed yet (or was rolled back). The
-            # upload endpoint commits before scheduling us, so reaching
-            # here indicates a race or a manually-deleted task. Fail
-            # gracefully instead of crashing the background handler.
-            logger.error("Pipeline: task %s not found; aborting", task_id)
-            return {"status": "skipped", "contract_id": None, "reason": "task_not_found"}
-        contract_id = task.contract_id
-
-        try:
-            # -- Step 1: file_detecting --
-            await _update_task(db, task_id, status="file_detecting", progress=5)
-
-            result = await db.execute(select(Contract).where(Contract.id == contract_id))
-            contract = result.scalar_one()
-
-            file_result = await db.execute(
-                select(ContractFile)
-                .where(ContractFile.contract_id == contract_id)
-                .order_by(ContractFile.version.desc())
-                .limit(1)
-            )
-            contract_file = file_result.scalar_one()
-            file_path = contract_file.file_path
-            file_type = contract_file.file_type
-
-            await _update_contract(db, contract_id, status="processing")
-
-            # -- Step 2: text_extracting --
-            await _update_task(db, task_id, status="text_extracting", progress=15)
-            ocr_result = await OCRService.process(db, contract_id, file_path, file_type)
-
-            contract.page_count = len(ocr_result.pages)
-            contract.title = _extract_title(ocr_result.full_text)
-
-            # -- Step 3: ocr_processing --
-            await _update_task(db, task_id, status="ocr_processing", progress=30)
-            # OCR blocks already persisted by OCRService; this step is reserved
-            # for post-processing (table structure, formula detection, etc.)
-
-            # -- Step 4: field_extracting (classify + extract) --
-            await _update_task(db, task_id, status="field_extracting", progress=60)
-            from app.services.extraction_service import extract_and_save
-            extraction = await extract_and_save(
-                db, contract_id, ocr_result.full_text,
-            )
-            if extraction.contract_type:
-                contract.contract_type = extraction.contract_type
-                contract.contract_type_confidence = extraction.contract_type_confidence
-
-            # -- Step 5: validating --
-            await _update_task(db, task_id, status="validating", progress=80)
-            from app.services.rule_validation_service import validate_fields
-            validate_fields(extraction.fields)
-
-            # -- Step 6: review_pending --
-            await _update_task(db, task_id, status="review_pending", progress=95)
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
-            contract.ocr_completed_at = now
-            contract.extraction_completed_at = now
-            contract.status = "reviewing"
-            contract.updated_at = now
-
-            # -- Commit all domain data in one transaction --
-            await db.commit()
-
-            # -- Step 8: completed --
-            await _update_task(db, task_id, status="completed", progress=100)
-
-            return {"status": "completed", "contract_id": str(contract_id)}
-
-        except Exception as exc:
-            logger.error("Pipeline failed for task %s: %s", task_id, exc, exc_info=True)
-            current_status = task.status
-            current_progress = task.progress
-            await db.rollback()
-            # Determine which step failed
-            step = current_status if current_status != "pending" else "unknown"
-            failed_status = f"{step}_failed"
-            try:
-                await _update_task(
-                    db, task_id, status=failed_status, progress=current_progress,
-                    error_message=str(exc),
-                )
-            except Exception:
-                logger.error("Failed to mark task %s as %s", task_id, failed_status, exc_info=True)
-            try:
-                await _update_contract(db, contract_id, status="failed")
-            except Exception:
-                logger.error("Failed to mark contract %s as failed", contract_id, exc_info=True)
-            raise
 
 
 async def _run_ocr_pipeline_inner(
@@ -261,7 +144,6 @@ async def _run_ocr_pipeline_inner(
             await _update_task(db, task_id, status="text_extracting", progress=15)
             ocr_result = await OCRService.process(db, contract_id, contract_file.file_path, contract_file.file_type)
 
-            await _update_task(db, task_id, status="ocr_processing", progress=80)
             contract.page_count = len(ocr_result.pages)
             contract.title = _extract_title(ocr_result.full_text)
             now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -326,11 +208,6 @@ async def _run_extraction_pipeline_inner(
                 contract.contract_type = extraction.contract_type
                 contract.contract_type_confidence = extraction.contract_type_confidence
 
-            await _update_task(db, task_id, status="validating", progress=80)
-            from app.services.rule_validation_service import validate_fields
-            validate_fields(extraction.fields)
-
-            await _update_task(db, task_id, status="review_pending", progress=95)
             now = datetime.now(timezone.utc).replace(tzinfo=None)
             contract.extraction_completed_at = now
             contract.status = "reviewing"

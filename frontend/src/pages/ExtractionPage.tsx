@@ -7,7 +7,6 @@ import type { PDFDocumentProxy, RenderTask } from "pdfjs-dist/types/src/pdf";
 import { getCurrentPageFromScroll } from "../components/pdfPageScroll";
 import type { FieldDefinitionItem } from "../lib/api";
 import {
-  createExtractionPreview,
   createFieldDefinition,
   getContractDetail,
   getTask,
@@ -29,7 +28,7 @@ const PREVIEW_ZOOM_STEP = 0.1;
 const MAX_BATCH_FILES = 5;
 const IMAGE_MAX_SIZE = 5 * 1024 * 1024;
 const DOCUMENT_MAX_SIZE = 60 * 1024 * 1024;
-const ALLOWED_EXTRACT_EXTENSIONS = new Set(["pdf", "doc", "docx", "png", "jpg", "jpeg", "bmp"]);
+const ALLOWED_EXTRACT_EXTENSIONS = new Set(["pdf", "png", "jpg", "jpeg", "bmp"]);
 const prepareContractCache = new WeakMap<File, Promise<UploadResponse>>();
 
 type BatchStatus = "pending" | "processing" | "completed" | "failed" | "skipped";
@@ -111,17 +110,16 @@ export function ExtractionPage() {
             id="extract-files"
             type="file"
             multiple
-            accept=".pdf,.doc,.docx,.png,.jpg,.jpeg,.bmp,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/png,image/jpeg,image/bmp"
+            accept=".pdf,.png,.jpg,.jpeg,.bmp,application/pdf,image/png,image/jpeg,image/bmp"
             aria-label="上传合同提取文件"
             onChange={handleFilesChange}
           />
           <span className="extract-upload-icon" aria-hidden="true">
             <i>PDF</i>
-            <i>W</i>
             <i>IMG</i>
           </span>
           <strong>拖拽文件上传或点击上传本地文件</strong>
-          <small>支持格式 pdf/word/png/jpg/jpeg/bmp，数量不超过5份，图片5MB以内，其他文件60MB以内</small>
+          <small>支持格式 pdf/png/jpg/jpeg/bmp，数量不超过5份，图片5MB以内，其他文件60MB以内</small>
         </label>
         {uploadError && (
           <div className="extract-error-banner extract-upload-error" role="alert">
@@ -144,10 +142,6 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
   const activeItem = items.find((item) => item.id === activeItemId) ?? items[0];
   const activeFile = activeItem?.file ?? initialItems[0]?.file;
   const isPdf = Boolean(activeFile && (activeFile.type === "application/pdf" || activeFile.name.toLowerCase().endsWith(".pdf")));
-  const isWord = Boolean(activeFile && /\.(doc|docx)$/i.test(activeFile.name));
-  const [wordPreviewUrl, setWordPreviewUrl] = useState("");
-  const [wordPreviewState, setWordPreviewState] = useState<"idle" | "loading" | "ready" | "error">("idle");
-  const [wordPreviewError, setWordPreviewError] = useState("");
   const [fields, setFields] = useState<FieldDefinitionItem[]>([]);
   const [libraryFields, setLibraryFields] = useState<FieldDefinitionItem[]>([]);
   const [fieldLibraryState, setFieldLibraryState] = useState<"loading" | "ready" | "error">("loading");
@@ -191,45 +185,6 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
       currentItems.map((item) => (item.id === itemId ? { ...item, ...patch } : item)),
     );
   }, []);
-
-  useEffect(() => {
-    if (!activeFile || !isWord) {
-      setWordPreviewUrl("");
-      setWordPreviewState("idle");
-      setWordPreviewError("");
-      return undefined;
-    }
-
-    let isCurrent = true;
-    let objectUrl = "";
-    setWordPreviewUrl("");
-    setWordPreviewState("loading");
-    setWordPreviewError("");
-
-    createExtractionPreview(activeFile)
-      .then((blob) => {
-        if (!isCurrent) {
-          return;
-        }
-        objectUrl = URL.createObjectURL(blob);
-        setWordPreviewUrl(objectUrl);
-        setWordPreviewState("ready");
-      })
-      .catch((err) => {
-        if (!isCurrent) {
-          return;
-        }
-        setWordPreviewError(err instanceof Error ? err.message : "Word 预览失败。");
-        setWordPreviewState("error");
-      });
-
-    return () => {
-      isCurrent = false;
-      if (objectUrl) {
-        URL.revokeObjectURL(objectUrl);
-      }
-    };
-  }, [activeFile, isWord]);
 
   useEffect(() => {
     const runId = batchRunIdRef.current + 1;
@@ -419,11 +374,7 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
     uploaded: "已上传，等待开始...",
     file_detecting: "正在检测文件类型...",
     text_extracting: "正在提取文本...",
-    ocr_processing: "正在识别文字...",
-    layout_analyzing: "正在分析布局...",
     field_extracting: "正在提取字段...",
-    validating: "正在校验数据...",
-    review_pending: "等待复核...",
     completed: "处理完成",
   };
 
@@ -597,17 +548,21 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
       }
     }
 
-    const [refreshedItem] = await refreshOcrTaskStatuses([latestItem]);
-    updateItem(item.id, refreshedItem);
-    if (refreshedItem.ocrStatus === "completed" && refreshedItem.upload) {
-      await extractSingleBatchItem(refreshedItem, selectedFields, updateItem);
+    if (latestItem.ocrStatus !== "completed") {
+      const [refreshedItem] = await refreshOcrTaskStatuses([latestItem]);
+      latestItem = refreshedItem;
+      updateItem(item.id, refreshedItem);
+    }
+
+    if (latestItem.ocrStatus === "completed" && latestItem.upload) {
+      await extractSingleBatchItem(latestItem, selectedFields, updateItem);
       return;
     }
 
     updateItem(item.id, {
       extractionStatus: "skipped",
-      extractionStage: refreshedItem.ocrStage || "failed",
-      error: refreshedItem.error || "OCR预处理失败，已跳过提取",
+      extractionStage: latestItem.ocrStage || "failed",
+      error: latestItem.error || "OCR预处理失败，已跳过提取",
     });
   }
 
@@ -768,18 +723,6 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
                 <DocumentFallback file={initialItems[0].file} message="请选择合同文件" />
               ) : isPdf ? (
                 <FlatPdfPreview src={activeItem.documentUrl} file={activeFile} />
-              ) : isWord && wordPreviewState === "ready" && wordPreviewUrl ? (
-                <FlatPdfPreview src={wordPreviewUrl} file={activeFile} />
-              ) : isWord ? (
-                <DocumentFallback
-                  file={activeFile}
-                  message={
-                    wordPreviewState === "error"
-                      ? wordPreviewError || "Word 预览失败，请确认后端已安装 LibreOffice。"
-                    : "正在将 Word 转为 PDF 预览..."
-                  }
-                  isError={wordPreviewState === "error"}
-                />
               ) : (
                 <DocumentFallback file={activeFile} />
               )}
@@ -1111,7 +1054,7 @@ function validateBatchFiles(files: File[]): string {
   for (const file of files) {
     const extension = getFileExtension(file.name);
     if (!ALLOWED_EXTRACT_EXTENSIONS.has(extension)) {
-      return `文件“${file.name}”格式不支持，请上传 pdf、word、png、jpg、jpeg 或 bmp。`;
+      return `文件“${file.name}”格式不支持，请上传 pdf、png、jpg、jpeg 或 bmp。`;
     }
     const maxSize = isImageFile(file) ? IMAGE_MAX_SIZE : DOCUMENT_MAX_SIZE;
     if (file.size > maxSize) {

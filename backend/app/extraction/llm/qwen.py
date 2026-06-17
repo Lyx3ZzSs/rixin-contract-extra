@@ -17,7 +17,6 @@ from pydantic import BaseModel
 from app.config import settings
 from app.extraction.base import (
     BBox,
-    ClauseSegment,
     ExtractedField,
     ExtractionResult,
     RawExtractionResult,
@@ -93,7 +92,25 @@ def _build_dynamic_prompt(
 7. 不得新增未请求的字段，不得改写 field_key。
 8. source_text 必须是合同原文片段；如果 field_value 为 null，则 source_text 和 source_page 也返回 null。
 9. confidence 按证据明确程度给分：原文直接命中且字段含义清晰时较高；需从上下文判断、存在多个候选或表述不完整时降低。
-10. 不允许输出 Markdown，只输出一个合法的 JSON 对象。
+10. 可以在顶层返回 contract_type 和 contract_type_confidence；无法判断时返回 null 和 0。
+11. 不允许输出 Markdown，只输出一个合法的 JSON 对象。
+12. 顶层必须包含 fields 数组，不允许把 field_key 作为顶层字段名。
+
+输出格式示例：
+{{
+  "fields": [
+    {{
+      "field_key": "party-a-name",
+      "field_name": "甲方名称",
+      "field_value": "示例公司",
+      "source_text": "甲方：示例公司",
+      "source_page": 1,
+      "confidence": 0.95
+    }}
+  ],
+  "contract_type": null,
+  "contract_type_confidence": 0
+}}
 
 需要抽取的字段：
 
@@ -176,7 +193,7 @@ class QwenLLMProvider(LLMProvider):
             except FileNotFoundError:
                 logger.error("Prompt file not found: %s", prompt_path)
                 return ExtractionResult(
-                    contract_type=contract_type, fields=[], key_clauses=[],
+                    contract_type=contract_type, fields=[],
                 )
             user_msg = template.replace("{{contract_chunks}}", full_text)
 
@@ -189,9 +206,11 @@ class QwenLLMProvider(LLMProvider):
         # --- Optional DSPy-optimized path ---
         if settings.llm_use_dspy:
             try:
-                return self._extract_via_dspy(
+                result = self._extract_via_dspy(
                     full_text, contract_type, field_definitions,
                 )
+                result.key_clauses = []
+                return result
             except Exception as exc:
                 logger.warning(
                     "DSPy extraction failed, falling back to Instructor: %s", exc,
@@ -212,47 +231,15 @@ class QwenLLMProvider(LLMProvider):
             )
         except Exception as exc:
             logger.error("Instructor extraction failed: %s", exc, exc_info=True)
-            return ExtractionResult(
-                contract_type=contract_type, fields=[], key_clauses=[],
-            )
+            raise RuntimeError(f"Instructor extraction failed: {exc}") from exc
 
         # --- Convert RawExtractionResult → ExtractionResult ---
-        lookup = {f.field_key: f for f in field_definitions} if field_definitions else {}
-
-        fields: list[ExtractedField] = []
-        for rf in raw.fields:
-            defn = lookup.get(rf.field_key)
-            bbox = None
-            if rf.source_bbox and len(rf.source_bbox) == 4:
-                bbox = BBox(
-                    x1=rf.source_bbox[0], y1=rf.source_bbox[1],
-                    x2=rf.source_bbox[2], y2=rf.source_bbox[3],
-                )
-            fields.append(ExtractedField(
-                field_key=rf.field_key,
-                field_name=rf.field_name or rf.field_key,
-                value=str(rf.field_value) if rf.field_value is not None else None,
-                value_type=defn.value_type if defn else "string",
-                source_text=rf.source_text,
-                page_no=rf.source_page,
-                bbox=bbox,
-                confidence=rf.confidence,
-            ))
-
-        key_clauses: list[ClauseSegment] = []
-        for rc in raw.key_clauses:
-            key_clauses.append(ClauseSegment(
-                clause_type=rc.get("clause_type"),
-                clause_title=rc.get("clause_title"),
-                content=rc.get("content", ""),
-                confidence=rc.get("confidence", 0.8),
-            ))
+        fields = _convert_raw_fields(raw, field_definitions)
 
         return ExtractionResult(
             contract_type=raw.contract_type or contract_type,
             contract_type_confidence=raw.contract_type_confidence,
             fields=fields,
-            key_clauses=key_clauses,
         )
 
     def _extract_via_dspy(
@@ -293,40 +280,44 @@ class QwenLLMProvider(LLMProvider):
         )
 
         # Reuse the same conversion logic as extract_fields
-        lookup = {f.field_key: f for f in field_definitions} if field_definitions else {}
-        fields: list[ExtractedField] = []
-        for rf in raw.fields:
-            defn = lookup.get(rf.field_key)
-            bbox = None
-            if rf.source_bbox and len(rf.source_bbox) == 4:
-                bbox = BBox(
-                    x1=rf.source_bbox[0], y1=rf.source_bbox[1],
-                    x2=rf.source_bbox[2], y2=rf.source_bbox[3],
-                )
-            fields.append(ExtractedField(
-                field_key=rf.field_key,
-                field_name=rf.field_name or rf.field_key,
-                value=str(rf.field_value) if rf.field_value is not None else None,
-                value_type=defn.value_type if defn else "string",
-                source_text=rf.source_text,
-                page_no=rf.source_page,
-                bbox=bbox,
-                confidence=rf.confidence,
-            ))
-
-        key_clauses = [
-            ClauseSegment(
-                clause_type=rc.get("clause_type"),
-                clause_title=rc.get("clause_title"),
-                content=rc.get("content", ""),
-                confidence=rc.get("confidence", 0.8),
-            )
-            for rc in raw.key_clauses
-        ]
+        fields = _convert_raw_fields(raw, field_definitions)
 
         return ExtractionResult(
             contract_type=raw.contract_type or contract_type,
             contract_type_confidence=raw.contract_type_confidence,
             fields=fields,
-            key_clauses=key_clauses,
         )
+
+
+def _convert_raw_fields(
+    raw: RawExtractionResult,
+    field_definitions: list | None,
+) -> list[ExtractedField]:
+    lookup = {f.field_key: f for f in field_definitions} if field_definitions else {}
+    requested_keys = set(lookup)
+    fields: list[ExtractedField] = []
+
+    for rf in raw.fields:
+        if requested_keys and rf.field_key not in requested_keys:
+            logger.warning("Ignoring unrequested LLM field: %s", rf.field_key)
+            continue
+
+        defn = lookup.get(rf.field_key)
+        bbox = None
+        if rf.source_bbox and len(rf.source_bbox) == 4:
+            bbox = BBox(
+                x1=rf.source_bbox[0], y1=rf.source_bbox[1],
+                x2=rf.source_bbox[2], y2=rf.source_bbox[3],
+            )
+        fields.append(ExtractedField(
+            field_key=rf.field_key,
+            field_name=rf.field_name or (defn.field_name if defn else rf.field_key),
+            value=str(rf.field_value) if rf.field_value is not None else None,
+            value_type=defn.value_type if defn else "string",
+            source_text=rf.source_text,
+            page_no=rf.source_page,
+            bbox=bbox,
+            confidence=rf.confidence,
+        ))
+
+    return fields

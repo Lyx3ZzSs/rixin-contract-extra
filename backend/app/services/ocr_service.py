@@ -15,6 +15,7 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 
 from sqlalchemy import delete, select
@@ -23,6 +24,32 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.extraction.base import BBox, OCRDetailedResult, OCRPageResult, OCRTextBlock
 from app.extraction.ocr import get_ocr_provider
 from app.models.ocr import OCRBlock
+
+logger = logging.getLogger(__name__)
+
+_SUBJECT_KEYWORDS = ("甲方名称", "乙方名称", "甲方", "乙方")
+_LOG_SNIPPET_LIMIT = 200
+
+
+def _truncate_for_log(text: str | None, limit: int = _LOG_SNIPPET_LIMIT) -> str | None:
+    if text is None:
+        return None
+    normalized = " ".join(text.split())
+    if len(normalized) <= limit:
+        return normalized
+    return f"{normalized[:limit]}..."
+
+
+def _keyword_contexts(text: str, keywords: tuple[str, ...] = _SUBJECT_KEYWORDS) -> dict[str, str]:
+    contexts: dict[str, str] = {}
+    for keyword in keywords:
+        index = text.find(keyword)
+        if index < 0:
+            continue
+        start = max(0, index - 80)
+        end = min(len(text), index + len(keyword) + 120)
+        contexts[keyword] = _truncate_for_log(text[start:end]) or ""
+    return contexts
 
 
 class OCRService:
@@ -52,7 +79,34 @@ class OCRService:
         if not records:
             raise ValueError("OCR result contains no text blocks")
 
+        cls._log_ocr_diagnostics(contract_id, result, len(records))
         return result
+
+    @classmethod
+    def _log_ocr_diagnostics(
+        cls,
+        contract_id: uuid.UUID,
+        result: OCRDetailedResult,
+        block_count: int,
+    ) -> None:
+        full_text = result.full_text
+        contexts = _keyword_contexts(full_text)
+        payload = {
+            "contract_id": str(contract_id),
+            "provider": result.provider,
+            "page_count": len(result.pages),
+            "block_count": block_count,
+            "text_length": len(full_text),
+            "subject_keyword_hits": sorted(contexts.keys()),
+            "subject_keyword_contexts": contexts,
+        }
+        if contexts:
+            logger.info("OCR diagnostics: %s", payload)
+        else:
+            logger.warning(
+                "OCR diagnostics: no subject keywords found; possible OCR text missing or fragmented: %s",
+                payload,
+            )
 
     @classmethod
     async def save_blocks(

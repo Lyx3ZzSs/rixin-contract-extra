@@ -20,7 +20,6 @@ from pydantic import ValidationError
 
 from app.extraction.base import (
     BBox,
-    ClauseSegment,
     ExtractedField,
     ExtractionResult,
     RawExtractedField,
@@ -61,19 +60,6 @@ EXTRACTION_JSON_SCHEMA: dict[str, Any] = {
         },
         "contract_type": {"type": "string"},
         "contract_type_confidence": {"type": "number"},
-        "key_clauses": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "required": ["clause_title", "content"],
-                "properties": {
-                    "clause_type": {"type": "string"},
-                    "clause_title": {"type": "string"},
-                    "content": {"type": "string"},
-                    "confidence": {"type": "number"},
-                },
-            },
-        },
     },
 }
 
@@ -166,7 +152,6 @@ class LLMService:
             return ExtractionResult(
                 contract_type=contract_type,
                 fields=[],
-                key_clauses=[],
             )
 
         except (OSError, ValueError, RuntimeError) as exc:
@@ -213,28 +198,25 @@ class LLMService:
                 "Failed to extract valid JSON from LLM output (raw len=%d, preview=%.300r)",
                 len(raw_text), raw_text[:300],
             )
-            return ExtractionResult(contract_type=contract_type, fields=[], key_clauses=[])
+            return ExtractionResult(contract_type=contract_type, fields=[])
 
         try:
             data = json.loads(json_str)
         except json.JSONDecodeError as exc:
             logger.error("JSON parse error: %s", exc)
-            return ExtractionResult(contract_type=contract_type, fields=[], key_clauses=[])
+            return ExtractionResult(contract_type=contract_type, fields=[])
 
         try:
             raw_result = RawExtractionResult.model_validate(data)
         except ValidationError as exc:
             logger.error("JSON schema validation failed: %s", exc)
-            return ExtractionResult(contract_type=contract_type, fields=[], key_clauses=[])
+            return ExtractionResult(contract_type=contract_type, fields=[])
 
         fields = cls._convert_raw_fields(raw_result.fields, field_map_override=field_map_override)
-        key_clauses = cls._convert_raw_clauses(raw_result.key_clauses)
-
         return ExtractionResult(
             contract_type=raw_result.contract_type or contract_type,
             contract_type_confidence=raw_result.contract_type_confidence,
             fields=fields,
-            key_clauses=key_clauses,
         )
 
     @classmethod
@@ -266,18 +248,5 @@ class LLMService:
                 page_no=rf.source_page,
                 bbox=bbox,
                 confidence=rf.confidence,
-            ))
-        return result
-
-    @classmethod
-    def _convert_raw_clauses(cls, raw_clauses: list[dict[str, Any]]) -> list[ClauseSegment]:
-        """Convert raw clause dicts to ClauseSegment list."""
-        result: list[ClauseSegment] = []
-        for rc in raw_clauses:
-            result.append(ClauseSegment(
-                clause_type=rc.get("clause_type"),
-                clause_title=rc.get("clause_title"),
-                content=rc.get("content", ""),
-                confidence=rc.get("confidence", 0.8),
             ))
         return result

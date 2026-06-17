@@ -14,7 +14,7 @@ from app.models.task import ContractTask
 async def create_task(
     db: AsyncSession,
     contract_id: uuid.UUID,
-    task_type: str = "full_pipeline",
+    task_type: str = "ocr",
 ) -> ContractTask:
     """Create a new task record for a contract."""
     task = ContractTask(

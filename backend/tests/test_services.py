@@ -1,10 +1,12 @@
 """Tests for service layer."""
 
+import logging
+
 import pytest
 from sqlalchemy import select
 
-from app.extraction.base import ExtractedField, ExtractionResult, FieldSpec
-from app.models.contract import ExtractedField as ExtractedFieldRecord
+from app.extraction.base import ClauseSegment, ExtractedField, ExtractionResult, FieldSpec
+from app.models.contract import ContractClause, ExtractedField as ExtractedFieldRecord
 from app.services.clause_service import _classify_clause_type
 from app.services.rule_validation_service import validate_fields
 
@@ -64,10 +66,10 @@ async def test_extract_and_save_uses_request_scoped_fields(monkeypatch):
     )
     captured: dict = {}
 
-    async def fake_classify(_full_text: str):
-        return "service", 0.8
+    async def fail_classify(_full_text: str):
+        raise AssertionError("classify_contract_type should not be called")
 
-    async def fake_extract(_full_text: str, _contract_type: str | None, field_definitions=None):
+    async def fake_extract(_full_text: str, _contract_type: str | None = None, field_definitions=None):
         captured["field_definitions"] = field_definitions
         return ExtractionResult(
             contract_type="service",
@@ -86,7 +88,7 @@ async def test_extract_and_save_uses_request_scoped_fields(monkeypatch):
             key_clauses=[],
         )
 
-    monkeypatch.setattr(LLMService, "classify_contract_type", fake_classify)
+    monkeypatch.setattr(LLMService, "classify_contract_type", fail_classify)
     monkeypatch.setattr(LLMService, "extract_fields_from_text", fake_extract)
 
     async with test_session_factory() as db:
@@ -107,3 +109,219 @@ async def test_extract_and_save_uses_request_scoped_fields(monkeypatch):
     assert [field.field_key for field in captured["field_definitions"]] == ["party-a-name"]
     assert len(records) == 1
     assert records[0].field_key == "party-a-name"
+
+
+@pytest.mark.asyncio
+async def test_extract_and_save_does_not_persist_key_clauses(monkeypatch):
+    from tests.conftest import test_session_factory
+    from app.services.contract_service import create_contract
+    from app.services.extraction_service import extract_and_save
+    from app.services.llm_service import LLMService
+
+    async def fake_extract(_full_text: str, _contract_type: str | None = None, field_definitions=None):
+        return ExtractionResult(
+            contract_type="service",
+            contract_type_confidence=0.8,
+            fields=[],
+            key_clauses=[
+                ClauseSegment(
+                    clause_type="payment",
+                    clause_title="付款条款",
+                    content="分期付款。",
+                    confidence=0.9,
+                ),
+            ],
+        )
+
+    monkeypatch.setattr(LLMService, "extract_fields_from_text", fake_extract)
+
+    async with test_session_factory() as db:
+        contract = await create_contract(db, content_hash="no-key-clauses")
+        await extract_and_save(db, contract.id, "付款条款：分期付款。")
+        await db.commit()
+
+        result = await db.execute(
+            select(ContractClause).where(ContractClause.contract_id == contract.id)
+        )
+        clauses = result.scalars().all()
+
+    assert clauses == []
+
+
+@pytest.mark.asyncio
+async def test_extract_and_save_logs_null_and_missing_fields(monkeypatch, caplog):
+    from tests.conftest import test_session_factory
+    from app.services.contract_service import create_contract
+    from app.services.extraction_service import extract_and_save
+    from app.services.llm_service import LLMService
+
+    requested_fields = [
+        FieldSpec(field_key="party-a-name", field_name="甲方名称"),
+        FieldSpec(field_key="party-b-name", field_name="乙方名称"),
+    ]
+
+    async def fake_extract(_full_text: str, _contract_type: str | None = None, field_definitions=None):
+        return ExtractionResult(
+            contract_type="service",
+            contract_type_confidence=0.8,
+            fields=[
+                ExtractedField(
+                    field_key="party-a-name",
+                    field_name="甲方名称",
+                    value=None,
+                    source_text=None,
+                    page_no=None,
+                    confidence=0.2,
+                ),
+            ],
+        )
+
+    monkeypatch.setattr(LLMService, "extract_fields_from_text", fake_extract)
+    caplog.set_level(logging.INFO, logger="app.services.extraction_service")
+
+    async with test_session_factory() as db:
+        contract = await create_contract(db, content_hash="diagnostic-null-missing")
+        await extract_and_save(
+            db,
+            contract.id,
+            "甲方：北京日新科技有限公司\n乙方：上海恒信信息技术有限公司",
+            field_definitions=requested_fields,
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("Extraction request diagnostics" in message for message in messages)
+    assert any("llm_returned_null" in message and "party-a-name" in message for message in messages)
+    assert any("llm_missing_requested_field" in message and "party-b-name" in message for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_extract_and_save_persists_missing_requested_fields_as_null(monkeypatch):
+    from tests.conftest import test_session_factory
+    from app.services.contract_service import create_contract
+    from app.services.extraction_service import extract_and_save
+    from app.services.llm_service import LLMService
+
+    requested_fields = [
+        FieldSpec(field_key="party-a-name", field_name="甲方名称"),
+        FieldSpec(field_key="party-b-name", field_name="乙方名称"),
+    ]
+
+    async def fake_extract(_full_text: str, _contract_type: str | None = None, field_definitions=None):
+        return ExtractionResult(
+            fields=[
+                ExtractedField(
+                    field_key="party-a-name",
+                    field_name="甲方名称",
+                    value="江苏东大金智信息系统有限公司",
+                    source_text="甲方：江苏东大金智信息系统有限公司",
+                    page_no=2,
+                    confidence=0.98,
+                ),
+            ],
+        )
+
+    monkeypatch.setattr(LLMService, "extract_fields_from_text", fake_extract)
+
+    async with test_session_factory() as db:
+        contract = await create_contract(db, content_hash="persist-missing-as-null")
+        await extract_and_save(
+            db,
+            contract.id,
+            "甲方：江苏东大金智信息系统有限公司",
+            field_definitions=requested_fields,
+        )
+        await db.commit()
+
+        result = await db.execute(
+            select(ExtractedFieldRecord)
+            .where(ExtractedFieldRecord.contract_id == contract.id)
+            .order_by(ExtractedFieldRecord.field_key)
+        )
+        records = result.scalars().all()
+
+    assert [record.field_key for record in records] == ["party-a-name", "party-b-name"]
+    assert records[0].value == "江苏东大金智信息系统有限公司"
+    assert records[1].value is None
+    assert records[1].confidence == 0.0
+
+
+@pytest.mark.asyncio
+async def test_extract_and_save_fails_when_llm_returns_no_requested_fields(monkeypatch):
+    from tests.conftest import test_session_factory
+    from app.services.contract_service import create_contract
+    from app.services.extraction_service import extract_and_save
+    from app.services.llm_service import LLMService
+
+    requested_fields = [
+        FieldSpec(field_key="party-a-name", field_name="甲方名称"),
+        FieldSpec(field_key="party-b-name", field_name="乙方名称"),
+    ]
+
+    async def fake_extract(_full_text: str, _contract_type: str | None = None, field_definitions=None):
+        return ExtractionResult(fields=[])
+
+    monkeypatch.setattr(LLMService, "extract_fields_from_text", fake_extract)
+
+    async with test_session_factory() as db:
+        contract = await create_contract(db, content_hash="fail-empty-requested-fields")
+        with pytest.raises(RuntimeError, match="LLM returned no requested fields"):
+            await extract_and_save(
+                db,
+                contract.id,
+                "甲方：江苏东大金智信息系统有限公司",
+                field_definitions=requested_fields,
+            )
+
+        result = await db.execute(
+            select(ExtractedFieldRecord).where(ExtractedFieldRecord.contract_id == contract.id)
+        )
+        records = result.scalars().all()
+
+    assert records == []
+
+
+@pytest.mark.asyncio
+async def test_save_fields_logs_saved_null_and_non_null_keys(caplog):
+    from tests.conftest import test_session_factory
+    from app.services.contract_service import create_contract
+    from app.services.extraction_service import save_fields
+
+    caplog.set_level(logging.INFO, logger="app.services.extraction_service")
+
+    async with test_session_factory() as db:
+        contract = await create_contract(db, content_hash="diagnostic-save-fields")
+        await save_fields(
+            db,
+            contract.id,
+            [
+                ExtractedField(
+                    field_key="party-a-name",
+                    field_name="甲方名称",
+                    value="北京日新科技有限公司",
+                    confidence=0.95,
+                ),
+                ExtractedField(
+                    field_key="party-b-name",
+                    field_name="乙方名称",
+                    value=None,
+                    confidence=0.2,
+                ),
+            ],
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    save_logs = [message for message in messages if "Field save diagnostics" in message]
+    assert save_logs
+    assert "party-a-name" in save_logs[-1]
+    assert "party-b-name" in save_logs[-1]
+
+
+def test_extraction_log_truncate_helper_limits_text():
+    from app.services.extraction_service import _truncate_for_log
+
+    text = "source" * 100
+    truncated = _truncate_for_log(text)
+
+    assert truncated is not None
+    assert len(truncated) <= 203
+    assert truncated.endswith("...")

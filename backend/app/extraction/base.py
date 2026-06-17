@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class BBox(BaseModel):
@@ -108,7 +108,7 @@ class ExtractionResult(BaseModel):
     contract_type: str | None = None
     contract_type_confidence: float = 0.0
     fields: list[ExtractedField]
-    key_clauses: list[ClauseSegment]
+    key_clauses: list[ClauseSegment] = []
 
 
 # ---------------------------------------------------------------------------
@@ -127,13 +127,45 @@ class RawExtractedField(BaseModel):
     confidence: float = 0.8
     review_status: str = "extracted"
 
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_value_alias(cls, data):
+        if isinstance(data, dict) and "field_value" not in data and "value" in data:
+            data = dict(data)
+            data["field_value"] = data.get("value")
+        return data
+
 
 class RawExtractionResult(BaseModel):
     """Top-level structure of what the LLM returns."""
-    fields: list[RawExtractedField] = []
+    fields: list[RawExtractedField]
     contract_type: str | None = None
     contract_type_confidence: float = 0.0
-    key_clauses: list[dict] = []
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_top_level_field_map(cls, data):
+        if not isinstance(data, dict):
+            return data
+
+        normalized = dict(data)
+        fields = normalized.get("fields")
+        extracted_fields = list(fields) if isinstance(fields, list) else []
+
+        if not extracted_fields:
+            reserved_keys = {"fields", "contract_type", "contract_type_confidence"}
+            for key, value in data.items():
+                if key in reserved_keys or not isinstance(value, dict):
+                    continue
+                if not any(k in value for k in ("field_key", "field_value", "value", "source_text")):
+                    continue
+                field_data = dict(value)
+                field_data.setdefault("field_key", str(key))
+                extracted_fields.append(field_data)
+
+        if extracted_fields or "fields" not in normalized:
+            normalized["fields"] = extracted_fields
+        return normalized
 
 
 class RuleViolation(BaseModel):

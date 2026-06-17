@@ -1,8 +1,7 @@
 """PP-OCR provider -- direct text extraction + fast OCR for scans/images.
 
 Strategy:
-  - DOCX: python-docx direct extraction (text + tables)
-  - PDF:  pymupdf direct extraction, scan pages fall back to PP-OCR
+  - PDF:  lightweight pymupdf probe, then direct extraction or whole-PDF OCR
   - Images (png/jpg/bmp/tiff): PP-OCR
 """
 
@@ -11,7 +10,6 @@ from __future__ import annotations
 import base64
 import json
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -22,8 +20,6 @@ from app.extraction.base import BBox, OCRDetailedResult, OCRPageResult, OCRTextB
 from app.extraction.ocr.base import OCRProvider
 
 logger = logging.getLogger(__name__)
-
-_SCAN_PAGE_THRESHOLD = 20
 
 
 class PPOCRProvider(OCRProvider):
@@ -36,71 +32,17 @@ class PPOCRProvider(OCRProvider):
         if ext == "tif":
             ext = "tiff"
 
-        if file_type == "docx" or ext == "docx":
-            return self._extract_docx(file_path)
         if file_type == "pdf" or ext == "pdf":
             return self._extract_pdf(file_path)
         return self._extract_image(file_path)
-
-    def _extract_docx(self, file_path: str) -> OCRDetailedResult:
-        from docx import Document
-
-        doc = Document(file_path)
-        blocks: list[OCRTextBlock] = []
-        sort = 0
-
-        for para in doc.paragraphs:
-            text = para.text.strip()
-            if not text:
-                continue
-            sort += 1
-            is_heading = para.style is not None and "heading" in (para.style.name or "").lower()
-            blocks.append(OCRTextBlock(
-                block_type="title" if is_heading else "text",
-                text=text,
-                bbox=None,
-                confidence=1.0,
-                sort_order=sort,
-            ))
-
-        for table in doc.tables:
-            md = self._table_to_markdown(table)
-            if md:
-                sort += 1
-                blocks.append(OCRTextBlock(
-                    block_type="table",
-                    text=md,
-                    bbox=None,
-                    confidence=1.0,
-                    sort_order=sort,
-                ))
-
-        return OCRDetailedResult(
-            pages=[OCRPageResult(page_no=1, blocks=blocks, confidence=1.0)],
-            provider="ppocr_docx",
-        )
-
-    @staticmethod
-    def _table_to_markdown(table) -> str:
-        rows = []
-        for row in table.rows:
-            cells = [cell.text.strip().replace("\n", " ") for cell in row.cells]
-            rows.append("| " + " | ".join(cells) + " |")
-        if not rows:
-            return ""
-        col_count = len(table.rows[0].cells)
-        sep = "| " + " | ".join(["---"] * col_count) + " |"
-        return rows[0] + "\n" + sep + "\n" + "\n".join(rows[1:])
 
     def _extract_pdf(self, file_path: str) -> OCRDetailedResult:
         import fitz
 
         doc = fitz.open(file_path)
         try:
-            text_pages = self._extract_pdf_text_pages(doc)
-            text_len = len("\n".join(page.full_text for page in text_pages).strip())
-            text_page_count = sum(1 for page in text_pages if page.full_text.strip())
-            page_count = len(text_pages)
+            text_len, text_page_count, page_templates = self._probe_pdf_text(doc)
+            page_count = len(page_templates)
             text_page_ratio = text_page_count / page_count if page_count else 0
 
             if (
@@ -111,6 +53,7 @@ class PPOCRProvider(OCRProvider):
                     "PDF classified as text: pages=%d text_pages=%d text_len=%d ratio=%.2f",
                     page_count, text_page_count, text_len, text_page_ratio,
                 )
+                text_pages = self._extract_pdf_text_pages(doc)
                 return OCRDetailedResult(pages=text_pages, provider="ppocr_pdf_text")
 
             logger.info(
@@ -118,18 +61,33 @@ class PPOCRProvider(OCRProvider):
                 page_count, text_page_count, text_len, text_page_ratio,
             )
 
-            try:
-                whole_pages = self._call_ppocr_pdf(Path(file_path).read_bytes(), text_pages)
-                if self._has_any_text(whole_pages):
-                    return OCRDetailedResult(pages=whole_pages, provider="ppocr_pdf_whole")
-                logger.warning("Whole-PDF PP-OCR returned no text; falling back to page-image OCR")
-            except RuntimeError as exc:
-                logger.warning("Whole-PDF PP-OCR failed, falling back to page-image OCR: %s", exc)
-
-            fallback_pages = self._extract_pdf_page_images(doc, text_pages)
-            return OCRDetailedResult(pages=fallback_pages, provider="ppocr_pdf_page_fallback")
+            whole_pages = self._call_ppocr_pdf(Path(file_path).read_bytes(), page_templates)
+            if not self._has_any_text(whole_pages):
+                raise RuntimeError("Whole-PDF PP-OCR returned no text blocks")
+            return OCRDetailedResult(pages=whole_pages, provider="ppocr_pdf_whole")
         finally:
             doc.close()
+
+    def _probe_pdf_text(self, doc: Any) -> tuple[int, int, list[OCRPageResult]]:
+        pages: list[OCRPageResult] = []
+        text_len = 0
+        text_page_count = 0
+
+        for page_idx in range(len(doc)):
+            page = doc[page_idx]
+            text = page.get_text("text").strip()
+            if text:
+                text_page_count += 1
+                text_len += len(text)
+            pages.append(OCRPageResult(
+                page_no=page_idx + 1,
+                width=int(page.rect.width),
+                height=int(page.rect.height),
+                confidence=1.0,
+                blocks=[],
+            ))
+
+        return text_len, text_page_count, pages
 
     def _extract_pdf_text_pages(self, doc: Any) -> list[OCRPageResult]:
         import fitz
@@ -181,66 +139,6 @@ class PPOCRProvider(OCRProvider):
             ))
         return pages
 
-    def _extract_pdf_page_images(
-        self,
-        doc: Any,
-        text_pages: list[OCRPageResult],
-    ) -> list[OCRPageResult]:
-        page_jobs: list[tuple[int, bytes, int]] = []
-        pages = [
-            OCRPageResult(
-                page_no=page.page_no,
-                width=page.width,
-                height=page.height,
-                confidence=page.confidence,
-                blocks=list(page.blocks),
-            )
-            for page in text_pages
-        ]
-
-        for page_idx in range(len(doc)):
-            page = doc[page_idx]
-            page_result = pages[page_idx]
-            raw_text_len = len(page_result.full_text.strip())
-            if raw_text_len >= _SCAN_PAGE_THRESHOLD:
-                continue
-            logger.info(
-                "Page %d appears scanned (%d chars), invoking page-image PP-OCR",
-                page_result.page_no, raw_text_len,
-            )
-            pixmap = page.get_pixmap(dpi=settings.ppocr_pdf_dpi)
-            page_jobs.append((page_idx, pixmap.tobytes("png"), len(page_result.blocks)))
-
-        if not page_jobs:
-            return pages
-
-        errors: list[str] = []
-        max_workers = max(1, min(settings.ppocr_page_concurrency, len(page_jobs)))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_map = {
-                executor.submit(
-                    self._call_ppocr,
-                    img_bytes,
-                    pages[page_idx].page_no,
-                    sort_offset,
-                    True,
-                ): page_idx
-                for page_idx, img_bytes, sort_offset in page_jobs
-            }
-            for future in as_completed(future_map):
-                page_idx = future_map[future]
-                page_result = pages[page_idx]
-                try:
-                    page_result.blocks.extend(future.result())
-                    self._sort_blocks(page_result.blocks)
-                except RuntimeError as exc:
-                    errors.append(f"page {page_result.page_no}: {exc}")
-                    logger.warning("Page-image PP-OCR failed for page %d: %s", page_result.page_no, exc)
-
-        if not self._has_any_text(pages) and errors:
-            raise RuntimeError("; ".join(errors[:3]))
-        return pages
-
     @staticmethod
     def _guess_block_type(block: dict) -> str:
         for line in block.get("lines", []):
@@ -267,7 +165,6 @@ class PPOCRProvider(OCRProvider):
         img_bytes: bytes,
         page_no: int,
         sort_offset: int = 0,
-        allow_empty: bool = False,
     ) -> list[OCRTextBlock]:
         payload = self._build_ppocr_payload(img_bytes, file_type=1)
         response = self._http_post(settings.ppocr_url, payload, settings.ppocr_timeout)
@@ -285,15 +182,13 @@ class PPOCRProvider(OCRProvider):
                 "PP-OCR returned no text blocks for page %d; response_summary=%s",
                 page_no, self._response_summary(data),
             )
-            if allow_empty:
-                return []
             raise RuntimeError(f"PP-OCR returned no text blocks for page {page_no}")
         return blocks
 
     def _call_ppocr_pdf(
         self,
         pdf_bytes: bytes,
-        fallback_pages: list[OCRPageResult],
+        page_templates: list[OCRPageResult],
     ) -> list[OCRPageResult]:
         payload = self._build_ppocr_payload(pdf_bytes, file_type=0)
         response = self._http_post(settings.ppocr_url, payload, settings.ppocr_timeout)
@@ -305,12 +200,13 @@ class PPOCRProvider(OCRProvider):
         except (json.JSONDecodeError, ValueError) as exc:
             raise RuntimeError(f"PP-OCR returned invalid JSON: {exc}") from exc
 
-        pages = self._normalize_ppocr_pdf_response(data, fallback_pages)
+        pages = self._normalize_ppocr_pdf_response(data, page_templates)
         if not self._has_any_text(pages):
             logger.warning(
                 "Whole-PDF PP-OCR returned no text blocks; response_summary=%s",
                 self._response_summary(data),
             )
+            raise RuntimeError("Whole-PDF PP-OCR returned no text blocks")
         return pages
 
     @classmethod
@@ -350,7 +246,7 @@ class PPOCRProvider(OCRProvider):
     def _normalize_ppocr_pdf_response(
         cls,
         data: Any,
-        fallback_pages: list[OCRPageResult],
+        page_templates: list[OCRPageResult],
     ) -> list[OCRPageResult]:
         if isinstance(data, dict):
             error_code = data.get("errorCode")
@@ -362,7 +258,7 @@ class PPOCRProvider(OCRProvider):
         result = data.get("result") if isinstance(data, dict) else None
         if not isinstance(result, dict) or not isinstance(result.get("ocrResults"), list):
             blocks = cls._normalize_ppocr_response(data)
-            page = fallback_pages[0] if fallback_pages else OCRPageResult(page_no=1)
+            page = page_templates[0] if page_templates else OCRPageResult(page_no=1)
             return [
                 OCRPageResult(
                     page_no=page.page_no,
@@ -373,14 +269,14 @@ class PPOCRProvider(OCRProvider):
                 ),
             ]
 
-        dimensions = cls._extract_pdf_dimensions(result.get("dataInfo"), fallback_pages)
+        dimensions = cls._extract_pdf_dimensions(result.get("dataInfo"), page_templates)
         pages: list[OCRPageResult] = []
         for index, ocr_result in enumerate(result.get("ocrResults", [])):
-            fallback = fallback_pages[index] if index < len(fallback_pages) else None
-            page_no = fallback.page_no if fallback else index + 1
+            template = page_templates[index] if index < len(page_templates) else None
+            page_no = template.page_no if template else index + 1
             width, height = dimensions[index] if index < len(dimensions) else (
-                fallback.width if fallback else None,
-                fallback.height if fallback else None,
+                template.width if template else None,
+                template.height if template else None,
             )
             payload = ocr_result
             if isinstance(ocr_result, dict):
@@ -516,7 +412,7 @@ class PPOCRProvider(OCRProvider):
     @staticmethod
     def _extract_pdf_dimensions(
         data_info: Any,
-        fallback_pages: list[OCRPageResult],
+        page_templates: list[OCRPageResult],
     ) -> list[tuple[int | None, int | None]]:
         if isinstance(data_info, dict) and isinstance(data_info.get("pages"), list):
             return [
@@ -529,7 +425,7 @@ class PPOCRProvider(OCRProvider):
             ]
         if isinstance(data_info, dict) and data_info.get("width") is not None and data_info.get("height") is not None:
             return [(int(data_info.get("width")), int(data_info.get("height")))]
-        return [(page.width, page.height) for page in fallback_pages]
+        return [(page.width, page.height) for page in page_templates]
 
     @staticmethod
     def _sort_blocks(blocks: list[OCRTextBlock]) -> None:
