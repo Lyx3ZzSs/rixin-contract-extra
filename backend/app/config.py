@@ -14,9 +14,13 @@ class Settings(BaseSettings):
     ocr_provider: str = "mock"
     llm_provider: str = "mock"
 
-    # PPStructure (OCR + layout for scans/images)
-    ppstructure_url: str = "http://10.8.7.76:8081/layout-parsing"
-    ocr_timeout: int = 120
+    # PP-OCR (fast OCR for scans/images)
+    ppocr_url: str = "http://10.8.7.76:8081/ocr"
+    ppocr_timeout: int = 60
+    ppocr_pdf_text_min_chars: int = 100
+    ppocr_pdf_text_page_ratio: float = 0.8
+    ppocr_pdf_dpi: int = 200
+    ppocr_page_concurrency: int = 3
 
     # LLM (Qwen3-30B-A3B, OpenAI-compatible)
     llm_api_url: str = "http://10.10.10.245:8000/v1/chat/completions"

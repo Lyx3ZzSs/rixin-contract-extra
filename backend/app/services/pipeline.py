@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.database import async_session_factory
+from app.extraction.base import FieldSpec
 from app.models.contract import Contract, ContractFile
 from app.models.task import ContractTask
 from app.services.ocr_service import OCRService
@@ -131,11 +132,12 @@ async def run_ocr_pipeline(
 
 async def run_extraction_pipeline(
     task_id: uuid.UUID,
+    field_definitions: list[FieldSpec] | None = None,
     session_factory: async_sessionmaker | None = None,
 ) -> dict:
     """Run field extraction from already-persisted OCR blocks."""
     sf = session_factory if session_factory is not None else async_session_factory
-    return await _run_extraction_pipeline_inner(sf, task_id)
+    return await _run_extraction_pipeline_inner(sf, task_id, field_definitions=field_definitions)
 
 
 async def _run_pipeline_inner(
@@ -294,6 +296,7 @@ async def _run_ocr_pipeline_inner(
 async def _run_extraction_pipeline_inner(
     session_factory: async_sessionmaker,
     task_id: uuid.UUID,
+    field_definitions: list[FieldSpec] | None = None,
 ) -> dict:
     async with session_factory() as db:
         task, contract, contract_file = await _load_task_contract_file(db, task_id)
@@ -313,7 +316,12 @@ async def _run_extraction_pipeline_inner(
                 raise ValueError("OCR result is not ready")
 
             from app.services.extraction_service import extract_and_save
-            extraction = await extract_and_save(db, contract_id, ocr_result.full_text)
+            extraction = await extract_and_save(
+                db,
+                contract_id,
+                ocr_result.full_text,
+                field_definitions=field_definitions,
+            )
             if extraction.contract_type:
                 contract.contract_type = extraction.contract_type
                 contract.contract_type_confidence = extraction.contract_type_confidence

@@ -1,9 +1,12 @@
 """Tests for contract API endpoints."""
 
 import io
+import uuid
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import select
 
 
 def _upload(client, filename, content):
@@ -87,11 +90,77 @@ async def test_extract_prepared_contract_requires_ready_ocr(client, sample_pdf_c
         files={"file": ("not_ready.pdf", io.BytesIO(sample_pdf_content), "application/pdf")},
     )
     assert prepare_resp.status_code == 201
-    contract_id = prepare_resp.json()["data"]["contract_id"]
+    contract_id = uuid.UUID(prepare_resp.json()["data"]["contract_id"])
 
     extract_resp = await client.post(f"/api/v1/contracts/{contract_id}/extract")
     assert extract_resp.status_code == 409
     assert "OCR" in extract_resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_extract_prepared_contract_passes_selected_fields(
+    client,
+    sample_pdf_content,
+    tmp_upload_dir,
+    monkeypatch,
+):
+    from tests.conftest import test_session_factory
+    import app.api.contract as contract_api
+    from app.models.contract import Contract
+    from app.models.ocr import OCRBlock
+
+    prepare_resp = await client.post(
+        "/api/v1/contracts/prepare",
+        files={"file": ("ready.pdf", io.BytesIO(sample_pdf_content), "application/pdf")},
+    )
+    assert prepare_resp.status_code == 201
+    contract_id = uuid.UUID(prepare_resp.json()["data"]["contract_id"])
+
+    async with test_session_factory() as db:
+        result = await db.execute(select(Contract).where(Contract.id == contract_id))
+        contract = result.scalar_one()
+        contract.ocr_completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        db.add(OCRBlock(
+            contract_id=contract.id,
+            page_no=1,
+            block_type="text",
+            text="甲方名称：北京日新科技有限公司",
+            confidence=1.0,
+            bbox=None,
+            sort_order=1,
+            page_width=100,
+            page_height=100,
+        ))
+        await db.commit()
+
+    captured: dict = {}
+
+    async def capture_pipeline(task_id, field_definitions=None, *args, **kwargs):
+        captured["task_id"] = task_id
+        captured["field_definitions"] = field_definitions
+        return None
+
+    monkeypatch.setattr(contract_api, "run_extraction_pipeline", capture_pipeline)
+
+    extract_resp = await client.post(
+        f"/api/v1/contracts/{contract_id}/extract",
+        json={
+            "fields": [
+                {
+                    "field_key": "party-a-name",
+                    "field_name": "甲方名称",
+                    "description": "合同甲方",
+                    "value_type": "string",
+                },
+            ],
+        },
+    )
+
+    assert extract_resp.status_code == 202
+    assert captured["task_id"]
+    assert len(captured["field_definitions"]) == 1
+    assert captured["field_definitions"][0].field_key == "party-a-name"
+    assert captured["field_definitions"][0].field_name == "甲方名称"
 
 
 # ---- list ----

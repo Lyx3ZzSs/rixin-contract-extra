@@ -33,7 +33,7 @@ class OCRTextBlock(BaseModel):
     confidence: float = 0.0
     sort_order: int = 0
     paragraph_id: int | None = None   # groups blocks into logical paragraphs
-    font_size: float | None = None    # font size in points (from PPStructure / pymupdf)
+    font_size: float | None = None    # font size in points (from OCR provider / pymupdf)
 
 
 class OCRPageResult(BaseModel):

@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.extraction.base import (
@@ -55,6 +55,7 @@ async def extract_and_save(
     db: AsyncSession,
     contract_id: uuid.UUID,
     full_text: str,
+    field_definitions: list[FieldSpec] | None = None,
 ) -> ExtractionResult:
     """Run the full extraction pipeline for a contract.
 
@@ -64,17 +65,20 @@ async def extract_and_save(
     4. Persist fields to DB.
     5. Persist key clauses to DB.
     """
-    # Step 1: Load field definitions from DB
-    db_fields = await load_field_definitions(db)
+    # Step 1: Use request-scoped field definitions when provided; otherwise
+    # fall back to all active DB fields for legacy/full-pipeline calls.
+    if field_definitions is None:
+        db_fields = await load_field_definitions(db)
+        field_specs: list[FieldSpec] = [
+            FieldSpec(
+                field_key=f.field_key, field_name=f.field_name,
+                description=f.description, value_type=f.value_type,
+            )
+            for f in db_fields
+        ]
+    else:
+        field_specs = field_definitions
 
-    # Convert everything to FieldSpec — single type for prompt builder
-    field_specs: list[FieldSpec] = [
-        FieldSpec(
-            field_key=f.field_key, field_name=f.field_name,
-            description=f.description, value_type=f.value_type,
-        )
-        for f in db_fields
-    ]
     # Build lookup for save_fields.
     field_map: dict[str, FieldSpec] = {fs.field_key: fs for fs in field_specs}
 
@@ -116,6 +120,14 @@ async def save_fields(
     """Persist extracted fields to DB."""
     if field_map is None:
         field_map = {}
+
+    field_keys = [f.field_key for f in fields if f.field_key]
+    if field_keys:
+        await db.execute(
+            delete(ExtractedField)
+            .where(ExtractedField.contract_id == contract_id)
+            .where(ExtractedField.field_key.in_(field_keys))
+        )
 
     records: list[ExtractedField] = []
     for f in fields:

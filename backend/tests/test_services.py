@@ -1,8 +1,10 @@
 """Tests for service layer."""
 
 import pytest
+from sqlalchemy import select
 
-from app.extraction.base import ExtractedField
+from app.extraction.base import ExtractedField, ExtractionResult, FieldSpec
+from app.models.contract import ExtractedField as ExtractedFieldRecord
 from app.services.clause_service import _classify_clause_type
 from app.services.rule_validation_service import validate_fields
 
@@ -45,3 +47,63 @@ def test_validate_fields_missing_required():
     assert not result.passed
     missing = [v for v in result.violations if v.rule_name == "required_fields"]
     assert len(missing) >= 1  # At least party-b-name missing
+
+
+@pytest.mark.asyncio
+async def test_extract_and_save_uses_request_scoped_fields(monkeypatch):
+    from tests.conftest import test_session_factory
+    from app.services.contract_service import create_contract
+    from app.services.extraction_service import extract_and_save
+    from app.services.llm_service import LLMService
+
+    selected_field = FieldSpec(
+        field_key="party-a-name",
+        field_name="甲方名称",
+        description="合同甲方",
+        value_type="string",
+    )
+    captured: dict = {}
+
+    async def fake_classify(_full_text: str):
+        return "service", 0.8
+
+    async def fake_extract(_full_text: str, _contract_type: str | None, field_definitions=None):
+        captured["field_definitions"] = field_definitions
+        return ExtractionResult(
+            contract_type="service",
+            contract_type_confidence=0.8,
+            fields=[
+                ExtractedField(
+                    field_key=selected_field.field_key,
+                    field_name=selected_field.field_name,
+                    value="北京日新科技有限公司",
+                    value_type="string",
+                    source_text="甲方：北京日新科技有限公司",
+                    page_no=1,
+                    confidence=0.95,
+                ),
+            ],
+            key_clauses=[],
+        )
+
+    monkeypatch.setattr(LLMService, "classify_contract_type", fake_classify)
+    monkeypatch.setattr(LLMService, "extract_fields_from_text", fake_extract)
+
+    async with test_session_factory() as db:
+        contract = await create_contract(db, content_hash="request-scoped-fields")
+        await extract_and_save(
+            db,
+            contract.id,
+            "甲方：北京日新科技有限公司",
+            field_definitions=[selected_field],
+        )
+        await db.commit()
+
+        result = await db.execute(
+            select(ExtractedFieldRecord).where(ExtractedFieldRecord.contract_id == contract.id)
+        )
+        records = result.scalars().all()
+
+    assert [field.field_key for field in captured["field_definitions"]] == ["party-a-name"]
+    assert len(records) == 1
+    assert records[0].field_key == "party-a-name"

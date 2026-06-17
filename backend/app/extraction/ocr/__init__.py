@@ -6,7 +6,7 @@ def get_ocr_provider() -> OCRProvider:
     if name == "mock":
         from app.extraction.ocr.mock import MockOCRProvider
         return MockOCRProvider()
-    if name == "paddle":
-        from app.extraction.ocr.paddle import PaddleOCRProvider
-        return PaddleOCRProvider()
+    if name == "ppocr":
+        from app.extraction.ocr.ppocr import PPOCRProvider
+        return PPOCRProvider()
     raise ValueError(f"Unknown OCR provider: {name}")

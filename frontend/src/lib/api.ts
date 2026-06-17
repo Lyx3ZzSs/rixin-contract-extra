@@ -77,9 +77,24 @@ export async function prepareContract(file: File): Promise<UploadResponse> {
   return parseApiResponse<UploadResponse>(response);
 }
 
-export async function startContractExtraction(contractId: string): Promise<UploadResponse> {
+export async function startContractExtraction(
+  contractId: string,
+  fields?: FieldDefinitionItem[],
+): Promise<UploadResponse> {
+  const body = fields && fields.length > 0
+    ? JSON.stringify({
+        fields: fields.map(({ field_key, field_name, description, value_type }) => ({
+          field_key,
+          field_name,
+          description,
+          value_type,
+        })),
+      })
+    : undefined;
   const response = await fetch(toApiUrl(`/api/v1/contracts/${contractId}/extract`), {
     method: "POST",
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body,
   });
   return parseApiResponse<UploadResponse>(response);
 }

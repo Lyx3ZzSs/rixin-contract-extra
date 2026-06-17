@@ -16,7 +16,7 @@ from app.models import *  # noqa: F401,F403
 # Prevent the background pipeline from running during upload-focused tests.
 # Dedicated pipeline tests call run_pipeline() directly with an injected
 # session, so they are unaffected.
-async def _noop_pipeline(_task_id):
+async def _noop_pipeline(_task_id, *args, **kwargs):
     return None
 
 import app.api.contract as _contract_api

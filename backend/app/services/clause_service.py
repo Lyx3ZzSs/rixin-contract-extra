@@ -5,7 +5,7 @@ Supports two input modes:
 2. **Text-based**: from plain text (fallback) — uses regex to find article markers.
 
 Layout-aware enhancements (v2):
-- ``block_type == "title"`` from PPStructure is treated as a forced clause boundary.
+- ``block_type == "title"`` from OCR providers is treated as a forced clause boundary.
 - Title accumulation merges OCR-split titles (e.g. "第一条" + "合同目的").
 - Spatial gap analysis uses bbox positions to detect section boundaries.
 - Clause hierarchy: article (level=0) > section (level=1) > sub-clause (level=2).

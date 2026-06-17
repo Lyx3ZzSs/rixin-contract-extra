@@ -140,6 +140,16 @@ async def test_ocr_service_rejects_empty_results(monkeypatch):
         await OCRService.process(None, "00000000-0000-0000-0000-000000000000", "/tmp/empty.pdf", "pdf")
 
 
+def test_paddle_provider_is_not_available(monkeypatch):
+    from app.config import settings
+    from app.extraction.ocr import get_ocr_provider
+
+    monkeypatch.setattr(settings, "ocr_provider", "paddle")
+
+    with pytest.raises(ValueError, match="Unknown OCR provider: paddle"):
+        get_ocr_provider()
+
+
 @pytest.mark.asyncio
 async def test_bbox_from_list_roundtrip():
     """BBox.from_list / to_list should round-trip correctly."""

@@ -5,13 +5,15 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, Response
+from fastapi import APIRouter, Body, Depends, HTTPException, UploadFile, File, Query, Response
 from fastapi import BackgroundTasks
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database import get_db
+from app.extraction.base import FieldSpec
 from app.models.contract import Contract, ContractFile
 from app.schemas.contract import (
     ApiResponse,
@@ -30,6 +32,10 @@ _ALLOWED_TYPES = {"pdf", "docx", "png", "jpg", "jpeg", "gif", "bmp", "tiff", "ti
 
 
 router = APIRouter(prefix="/contracts", tags=["contracts"])
+
+
+class ExtractionStartRequest(BaseModel):
+    fields: list[FieldSpec] | None = None
 
 
 async def _load_contract_detail(db: AsyncSession, contract_id: uuid.UUID) -> Contract:
@@ -187,6 +193,7 @@ async def prepare_contract(
 async def extract_prepared_contract(
     contract_id: uuid.UUID,
     background_tasks: BackgroundTasks,
+    body: ExtractionStartRequest | None = Body(default=None),
     db: AsyncSession = Depends(get_db),
 ) -> ApiResponse:
     """Start field extraction from previously persisted OCR results."""
@@ -216,7 +223,8 @@ async def extract_prepared_contract(
     task = await task_service.create_task(db, contract.id, task_type="extraction")
     await db.commit()
 
-    background_tasks.add_task(run_extraction_pipeline, task.id)
+    field_specs = body.fields if body and body.fields else None
+    background_tasks.add_task(run_extraction_pipeline, task.id, field_specs)
 
     return ApiResponse(
         code=0,

@@ -434,7 +434,6 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
   ) {
     const maxAttempts = 180;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      await new Promise((resolve) => setTimeout(resolve, 2000));
       const poll = await getTask(taskId);
       onStatus(poll.status);
 
@@ -444,6 +443,7 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
       if (poll.status.endsWith("_failed")) {
         throw new Error(poll.error_message || failureMessage);
       }
+      await new Promise((resolve) => setTimeout(resolve, attempt < 10 ? 1000 : 2000));
     }
     throw new Error("处理超时，请稍后查看结果");
   }
@@ -499,7 +499,7 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
 
     try {
       onPatch(item.id, { extractionStatus: "processing", extractionStage: "field_extracting", error: "" });
-      const extractionTask = await startContractExtraction(item.upload.contract_id);
+      const extractionTask = await startContractExtraction(item.upload.contract_id, selectedFields);
       await waitForTaskCompletion(
         extractionTask.task_id,
         (status) => onPatch(item.id, { extractionStage: status }),
@@ -532,6 +532,9 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
     setExtractionError("");
     setExpandedResultKeys(new Set());
     setCurrentStep(3);
+    const runId = batchRunIdRef.current;
+    const selectedFields = fields.map((field) => ({ ...field }));
+    const itemsToExtract = await getLatestItems();
     setItems((currentItems) =>
       currentItems.map((item) => ({
         ...item,
@@ -543,22 +546,69 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
     );
 
     try {
-      await Promise.allSettled(Array.from(ocrSyncPromiseByItemRef.current.values()));
-      const currentItems = await getLatestItems();
-      const refreshedItems = await refreshOcrTaskStatuses(currentItems);
-      setItems(refreshedItems);
-      const readyItems = refreshedItems.filter((item) => item.ocrStatus === "completed" && item.upload);
-
-      if (readyItems.length === 0) {
-        throw new Error("没有可提取的文件，请确认 OCR 预处理完成后重试");
+      await Promise.allSettled(
+        itemsToExtract.map((item) => runExtractionWhenOcrReady(item, selectedFields, runId)),
+      );
+      const latestItems = await getLatestItems();
+      const hasCompleted = latestItems.some((item) => item.extractionStatus === "completed");
+      const hasTerminal = latestItems.some((item) =>
+        item.extractionStatus === "completed" ||
+        item.extractionStatus === "failed" ||
+        item.extractionStatus === "skipped",
+      );
+      if (!hasCompleted && !hasTerminal) {
+        setExtractionError("没有可提取的文件，请确认 OCR 预处理完成后重试");
       }
-
-      await Promise.all(readyItems.map((item) => extractSingleBatchItem(item, fields, updateItem)));
     } catch (err) {
       setExtractionError(err instanceof Error ? err.message : "提取失败，请重试");
     } finally {
       setIsExtracting(false);
     }
+  }
+
+  async function runExtractionWhenOcrReady(
+    item: BatchFileItem,
+    selectedFields: FieldDefinitionItem[],
+    runId: number,
+  ) {
+    const readyPromise = ocrSyncPromiseByItemRef.current.get(item.id);
+    if (readyPromise) {
+      await readyPromise;
+    }
+    if (batchRunIdRef.current !== runId) {
+      return;
+    }
+
+    let latestItem = (await getLatestItems()).find((candidate) => candidate.id === item.id) ?? item;
+    if (!latestItem.upload) {
+      try {
+        const upload = await ensurePrepareStarted(item.file);
+        latestItem = { ...latestItem, upload };
+        updateItem(item.id, { upload });
+      } catch (err) {
+        updateItem(item.id, {
+          ocrStatus: "failed",
+          ocrStage: "failed",
+          extractionStatus: "skipped",
+          extractionStage: "failed",
+          error: err instanceof Error ? err.message : "OCR预处理失败",
+        });
+        return;
+      }
+    }
+
+    const [refreshedItem] = await refreshOcrTaskStatuses([latestItem]);
+    updateItem(item.id, refreshedItem);
+    if (refreshedItem.ocrStatus === "completed" && refreshedItem.upload) {
+      await extractSingleBatchItem(refreshedItem, selectedFields, updateItem);
+      return;
+    }
+
+    updateItem(item.id, {
+      extractionStatus: "skipped",
+      extractionStage: refreshedItem.ocrStage || "failed",
+      error: refreshedItem.error || "OCR预处理失败，已跳过提取",
+    });
   }
 
   async function refreshOcrTaskStatuses(currentItems: BatchFileItem[]): Promise<BatchFileItem[]> {
@@ -644,6 +694,9 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
   const preparingCount = items.filter((item) => item.ocrStatus === "processing" || item.ocrStatus === "pending").length;
   const ocrCompletedCount = items.filter((item) => item.ocrStatus === "completed").length;
   const ocrFailedCount = items.filter((item) => item.ocrStatus === "failed").length;
+  const activeProgressMessage = getBatchProgressMessage(activeItem, isExtracting, stageMessages);
+  const pendingFieldValueText = activeItem ? getPendingFieldValueText(activeItem) : "等待提取...";
+  const showPendingFieldRows = Boolean(activeItem && !results && shouldShowPendingFieldRows(activeItem, isExtracting));
 
   return (
     <section className="extract-flow" aria-labelledby="extract-flow-title">
@@ -748,10 +801,10 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
                 {extractionError && (
                   <div className="extract-error-banner" role="alert">{extractionError}</div>
                 )}
-                {activeItem?.extractionStatus === "processing" && (
+                {activeProgressMessage && (
                   <div className="extract-status-bar">
                     <span className="extract-status-spinner" aria-hidden="true" />
-                    {stageMessages[activeItem.extractionStage] || "正在处理合同..."}
+                    {activeProgressMessage}
                   </div>
                 )}
                 {(activeItem?.extractionStatus === "failed" || activeItem?.extractionStatus === "skipped") && (
@@ -793,12 +846,12 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
                       );
                     })}
                   </div>
-                ) : activeItem?.extractionStatus === "processing" || activeItem?.ocrStatus === "completed" ? (
+                ) : showPendingFieldRows ? (
                   <div className="extract-card-list">
                     {fields.map((field) => (
                       <div className="extract-card-item" key={field.field_key}>
                         <span className="extract-card-name">{field.field_name}</span>
-                        <span className="extract-card-value loading">提取中...</span>
+                        <span className="extract-card-value loading">{pendingFieldValueText}</span>
                       </div>
                     ))}
                   </div>
@@ -1097,6 +1150,49 @@ function batchStatusTone(item: BatchFileItem): string {
     return "done";
   }
   return "active";
+}
+
+function shouldShowPendingFieldRows(item: BatchFileItem, isExtracting: boolean): boolean {
+  if (item.extractionStatus === "failed" || item.extractionStatus === "skipped") {
+    return false;
+  }
+  if (item.extractionStatus === "processing" || item.ocrStatus === "completed") {
+    return true;
+  }
+  return isExtracting && (item.ocrStatus === "pending" || item.ocrStatus === "processing");
+}
+
+function getPendingFieldValueText(item: BatchFileItem): string {
+  if (item.ocrStatus === "pending" || item.ocrStatus === "processing") {
+    return "等待OCR...";
+  }
+  if (item.extractionStatus === "processing") {
+    return "提取中...";
+  }
+  return "等待提取...";
+}
+
+function getBatchProgressMessage(
+  item: BatchFileItem | undefined,
+  isExtracting: boolean,
+  stageMessages: Record<string, string>,
+): string {
+  if (!item || item.extractionStatus === "failed" || item.extractionStatus === "skipped") {
+    return "";
+  }
+  if (item.extractionStatus === "processing") {
+    return stageMessages[item.extractionStage] || "正在处理合同...";
+  }
+  if (!isExtracting) {
+    return "";
+  }
+  if (item.ocrStatus === "pending" || item.ocrStatus === "processing") {
+    return stageMessages[item.ocrStage] || "等待OCR预处理完成...";
+  }
+  if (item.ocrStatus === "completed" && item.extractionStatus === "pending") {
+    return "等待开始字段提取...";
+  }
+  return "";
 }
 
 function buildFieldValues(fields: FieldDefinitionItem[], backendFields: FieldDetail[]): ExtractionFieldValue[] {
