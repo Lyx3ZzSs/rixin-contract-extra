@@ -6,9 +6,7 @@ eliminating the need for post-hoc JSON parsing and regex extraction.
 
 from __future__ import annotations
 
-import json
 import logging
-from pathlib import Path
 
 import instructor
 from openai import OpenAI
@@ -24,8 +22,6 @@ from app.extraction.base import (
 from app.extraction.llm.base import LLMProvider
 
 logger = logging.getLogger(__name__)
-
-_PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent / "prompts"
 
 _CLASSIFY_SYSTEM_PROMPT = (
     "你是一个合同类型分类助手。请根据合同文本判断合同类型。"
@@ -178,43 +174,20 @@ class QwenLLMProvider(LLMProvider):
     ) -> ExtractionResult:
         """Extract fields using Instructor for Pydantic-validated output.
 
-        Builds the prompt (dynamic from DB definitions or static fallback),
-        calls the LLM via Instructor, and converts the validated
-        RawExtractionResult into domain ExtractionResult.
+        Builds the prompt from request-scoped field definitions, calls the LLM
+        via Instructor, and converts the validated RawExtractionResult into
+        domain ExtractionResult.
         """
-        # --- Build prompt ---
-        if field_definitions:
-            user_msg = _build_dynamic_prompt(field_definitions, full_text, contract_type)
-        else:
-            # Fallback: load static prompt template
-            prompt_path = _PROMPTS_DIR / "extract_basic_fields.md"
-            try:
-                template = prompt_path.read_text(encoding="utf-8")
-            except FileNotFoundError:
-                logger.error("Prompt file not found: %s", prompt_path)
-                return ExtractionResult(
-                    contract_type=contract_type, fields=[],
-                )
-            user_msg = template.replace("{{contract_chunks}}", full_text)
+        if not field_definitions:
+            raise ValueError("Field definitions are required for Qwen extraction")
+
+        user_msg = _build_dynamic_prompt(field_definitions, full_text, contract_type)
 
         system_msg = (
             "你是一位资深合同审核专家，擅长从合同文本中精准提取结构化信息。"
         )
 
         logger.debug("Extraction prompt (first 500 chars): %s", user_msg[:500])
-
-        # --- Optional DSPy-optimized path ---
-        if settings.llm_use_dspy:
-            try:
-                result = self._extract_via_dspy(
-                    full_text, contract_type, field_definitions,
-                )
-                result.key_clauses = []
-                return result
-            except Exception as exc:
-                logger.warning(
-                    "DSPy extraction failed, falling back to Instructor: %s", exc,
-                )
 
         # --- Call LLM via Instructor ---
         try:
@@ -234,52 +207,6 @@ class QwenLLMProvider(LLMProvider):
             raise RuntimeError(f"Instructor extraction failed: {exc}") from exc
 
         # --- Convert RawExtractionResult → ExtractionResult ---
-        fields = _convert_raw_fields(raw, field_definitions)
-
-        return ExtractionResult(
-            contract_type=raw.contract_type or contract_type,
-            contract_type_confidence=raw.contract_type_confidence,
-            fields=fields,
-        )
-
-    def _extract_via_dspy(
-        self,
-        full_text: str,
-        contract_type: str | None,
-        field_definitions: list | None,
-    ) -> ExtractionResult:
-        """Try extraction via a DSPy-optimized program (if available).
-
-        Falls back to returning a failed ExtractionResult on any error,
-        which the caller handles by falling back to Instructor.
-        """
-        from pathlib import Path as _Path
-
-        # Load the optimized program
-        examples_dir = _Path(settings.llm_dspy_examples_path).parent
-        optimized_path = examples_dir / "dspy_optimized.json"
-        if not optimized_path.exists():
-            raise FileNotFoundError(f"DSPy optimized program not found: {optimized_path}")
-
-        # Call the DSPy-optimized endpoint via Instructor (reusing the client)
-        # The optimized prompt is a system message refinement, not a model swap
-        system_msg = (
-            "你是一位资深合同审核专家。使用 DSPy 优化的提取策略。"
-        )
-
-        raw: RawExtractionResult = self._client.chat.completions.create(
-            model=settings.llm_model_name,
-            response_model=RawExtractionResult,
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": full_text},
-            ],
-            max_tokens=settings.llm_max_tokens,
-            temperature=settings.llm_temperature,
-            max_retries=1,
-        )
-
-        # Reuse the same conversion logic as extract_fields
         fields = _convert_raw_fields(raw, field_definitions)
 
         return ExtractionResult(

@@ -14,7 +14,7 @@ from app.services.llm_service import (
     RawExtractedField,
     _extract_json_from_text,
 )
-from app.extraction.llm.qwen import _build_dynamic_prompt
+from app.extraction.llm.qwen import QwenLLMProvider, _build_dynamic_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +177,12 @@ class TestDynamicPrompt:
         assert "每个 field_key 只能出现一次" in prompt
         assert "source_text 必须是合同原文片段" in prompt
         assert "甲方/乙方/当事人优先查合同首部和签章区" in prompt
+
+    def test_qwen_requires_field_definitions(self):
+        provider = QwenLLMProvider()
+
+        with pytest.raises(ValueError, match="Field definitions are required"):
+            provider.extract_fields("甲方：测试公司", field_definitions=None)
 
 
 # ---------------------------------------------------------------------------

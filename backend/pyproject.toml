@@ -19,7 +19,6 @@ dependencies = [
     "pillow>=11.0,<12",
     "instructor>=1.7,<2",
     "openai>=1.55,<2",
-    "dspy-ai>=2.5,<3",
 ]
 
 [project.optional-dependencies]
