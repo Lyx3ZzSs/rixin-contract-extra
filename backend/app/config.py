@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     ocr_provider: str = "mock"
     llm_provider: str = "mock"
 
+    # PP-StructureV3 (layout-aware: tables, regions, reading order)
+    ppstructurev3_url: str = "http://10.8.7.76:8082/structure"
+
     # PP-OCR (fast OCR for scans/images)
     ppocr_url: str = "http://10.8.7.76:8081/ocr"
     ppocr_timeout: int = 60

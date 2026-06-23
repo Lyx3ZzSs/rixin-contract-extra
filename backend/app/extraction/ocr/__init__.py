@@ -9,4 +9,7 @@ def get_ocr_provider() -> OCRProvider:
     if name == "ppocr":
         from app.extraction.ocr.ppocr import PPOCRProvider
         return PPOCRProvider()
+    if name == "ppstructurev3":
+        from app.extraction.ocr.ppstructurev3 import PPStructureV3Provider
+        return PPStructureV3Provider()
     raise ValueError(f"Unknown OCR provider: {name}")
