@@ -582,7 +582,7 @@ from __future__ import annotations
 
 import re
 
-from app.extraction.base import ExtractionResult, ExtractedField, OCRDetailedResult
+from app.extraction.base import ExtractionResult, ExtractedField
 
 # Matches a line that is exactly a page marker produced by to_markdown().
 _PAGE_MARKER_RE = re.compile(
@@ -668,7 +668,7 @@ def merge_results(per_chunk: list[ExtractionResult]) -> ExtractionResult:
 
 
 # Re-export so callers don't need a second import.
-__all__ = ["split_by_pages", "merge_results", "OCRDetailedResult"]
+__all__ = ["split_by_pages", "merge_results"]
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -1103,36 +1103,23 @@ git commit -m "feat(ocr): add PP-StructureV3 layout-aware provider with table st
 - Consumes: `OCRDetailedResult.to_markdown()` (Task 1); `extract_and_save(db, contract_id, full_text, field_definitions)` (existing). `llm_chunk_pages` / `ppstructurev3_url` config (Tasks 3–4).
 - Produces: the extraction LLM now receives page-marked, table-structured markdown instead of flat text. Long contracts chunk correctly (Task 3) because the markers are present.
 
-- [ ] **Step 1: Write the failing regression test**
+- [ ] **Step 1: Add the input-contract guard test**
 
 Append to `backend/tests/eval/test_extraction_accuracy.py`:
 
 ```python
 @pytest.mark.eval
-async def test_extraction_pipeline_feeds_markdown(monkeypatch):
-    """The extraction pipeline must pass to_markdown() (with page markers) to
-    the LLM, not flat full_text. Verified by intercepting extract_fields_from_text.
+async def test_pipeline_input_markdown_has_page_markers():
+    """Input-contract guard for the Task 5 wiring change.
+
+    The markdown the pipeline now feeds to extraction (OCRDetailedResult.to_markdown())
+    must carry page markers — Task 3 chunking splits on them. This pins that
+    contract. The wiring itself (pipeline.py passing to_markdown() to
+    extract_and_save) is verified end-to-end by the existing extraction-pipeline
+    test in test_task_api.py, which must stay green after the one-line change.
     """
-    from app.services import llm_service
-    from app.services import pipeline
     from app.extraction.ocr.mock import MOCK_DETAILED_RESULT
-
-    captured: dict = {}
-
-    async def fake_extract(db, contract_id, full_text, field_definitions=None):
-        captured["text"] = full_text
-        from app.extraction.base import ExtractionResult, ExtractedField
-        return ExtractionResult(fields=[
-            ExtractedField(field_key="party-a-name", value="北京日新科技有限公司"),
-        ])
-
-    monkeypatch.setattr(llm_service.LLMService, "extract_fields_from_text", fake_extract)
-
-    # Build a minimal OCRDetailedResult the way load_result would, then call
-    # the real markdown path through extract_and_save's text input contract.
-    markdown = MOCK_DETAILED_RESULT.to_markdown()
-    await fake_extract(None, "cid", markdown)
-    assert "<!-- page:" in captured["text"], "extraction must receive page-marked markdown"
+    assert "<!-- page:" in MOCK_DETAILED_RESULT.to_markdown()
 ```
 
 - [ ] **Step 2: Run the test to verify the markdown contract holds**
