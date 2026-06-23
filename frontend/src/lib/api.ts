@@ -242,8 +242,8 @@ export async function deleteFieldDefinition(fieldKey: string): Promise<void> {
     method: "DELETE",
     headers: authHeaders(),
   });
+  handle401(response);
   if (!response.ok) {
-    handle401(response);
     throw new Error(`删除字段失败 (${response.status})`);
   }
 }

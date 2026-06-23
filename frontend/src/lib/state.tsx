@@ -1,6 +1,6 @@
 import { createContext, useContext, useReducer, useEffect, type ReactNode } from "react";
 
-import { clearApiKey } from "./api";
+import { clearApiKey, getApiKey } from "./api";
 import { readRoute, type AppRoute } from "./routes";
 
 const AUTH_STORAGE_KEY = "rixin_contract_auth_user";
@@ -20,8 +20,9 @@ export type Action =
   | { type: "TOGGLE_EXTRACTION_MENU" };
 
 function getInitialState(): AppState {
+  const hasKey = !!getApiKey();
   return {
-    currentUser: window.localStorage.getItem(AUTH_STORAGE_KEY),
+    currentUser: hasKey ? window.localStorage.getItem(AUTH_STORAGE_KEY) : null,
     route: readRoute(),
     isSidebarExpanded: false,
     isExtractionMenuOpen: true,
