@@ -7,6 +7,7 @@ import type { PDFDocumentProxy, RenderTask } from "pdfjs-dist/types/src/pdf";
 import { getCurrentPageFromScroll } from "../components/pdfPageScroll";
 import type { FieldDefinitionItem } from "../lib/api";
 import {
+  batchReviewFields,
   createFieldDefinition,
   getContractDetail,
   getTask,
@@ -31,6 +32,7 @@ const IMAGE_MAX_SIZE = 5 * 1024 * 1024;
 const DOCUMENT_MAX_SIZE = 60 * 1024 * 1024;
 const ALLOWED_EXTRACT_EXTENSIONS = new Set(["pdf", "png", "jpg", "jpeg", "bmp"]);
 const prepareContractCache = new WeakMap<File, Promise<UploadResponse>>();
+const LOW_CONFIDENCE_THRESHOLD = 0.7;
 
 type BatchStatus = "pending" | "processing" | "completed" | "failed" | "skipped";
 
@@ -183,6 +185,8 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
   const [reviewingFieldKey, setReviewingFieldKey] = useState<string | null>(null);
   const [reviewDraft, setReviewDraft] = useState<string>("");
   const [reviewSavingKey, setReviewSavingKey] = useState<string | null>(null);
+  const [selectedReviewKeys, setSelectedReviewKeys] = useState<Set<string>>(new Set());
+  const [batchBusy, setBatchBusy] = useState(false);
 
   const updateItem = useCallback((itemId: string, patch: Partial<BatchFileItem>) => {
     setItems((currentItems) =>
@@ -303,6 +307,30 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
       alert("复核保存失败，请重试");
     } finally {
       setReviewSavingKey(null);
+    }
+  }
+
+  async function runBatchReview(action: "approve" | "reject") {
+    if (!activeItem?.upload || !activeItem.results) return;
+    const chosen = activeItem.results.filter(
+      (r) => selectedReviewKeys.has(r.field_key) && r.field_id,
+    );
+    if (chosen.length === 0) return;
+    setBatchBusy(true);
+    try {
+      await batchReviewFields(
+        activeItem.upload.contract_id,
+        chosen.map((r) => ({ field_id: r.field_id, action })),
+      );
+      const detail = await getContractDetail(activeItem.upload.contract_id);
+      const nextResults = buildFieldValues(fields, detail.fields);
+      updateItem(activeItem.id, { results: nextResults });
+      setSelectedReviewKeys(new Set());
+    } catch (err) {
+      console.error("batch review failed", err);
+      alert("批量复核失败，请重试");
+    } finally {
+      setBatchBusy(false);
     }
   }
 
@@ -788,6 +816,35 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
                   </div>
                 )}
                 {results ? (
+                  <>
+                  {results.some((r) => r.field_id) && (
+                    <div className="extract-review-toolbar">
+                      <button
+                        type="button"
+                        className="extract-value-toggle"
+                        disabled={selectedReviewKeys.size === 0 || batchBusy}
+                        onClick={() => runBatchReview("approve")}
+                      >
+                        批量通过 ({selectedReviewKeys.size})
+                      </button>
+                      <button
+                        type="button"
+                        className="extract-value-toggle"
+                        disabled={batchBusy}
+                        onClick={() =>
+                          setSelectedReviewKeys(
+                            new Set(
+                              results
+                                .filter((r) => r.confidence < LOW_CONFIDENCE_THRESHOLD && r.field_id)
+                                .map((r) => r.field_key),
+                            ),
+                          )
+                        }
+                      >
+                        仅选低置信
+                      </button>
+                    </div>
+                  )}
                   <div className="extract-card-list">
                     {results.map((r) => {
                       const valueText =
@@ -795,9 +852,27 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
                       const resultKey = getExtractionResultIdentity(r);
                       const isExpanded = expandedResultKeys.has(resultKey);
                       const canExpand = r.status === "found" && isLongExtractionValue(valueText);
+                      const isLowConfidence =
+                        r.confidence != null && r.confidence < LOW_CONFIDENCE_THRESHOLD;
                       return (
-                        <div className="extract-card-item result" key={resultKey}>
+                        <div
+                          className={`extract-card-item result${isLowConfidence ? " low-confidence" : ""}`}
+                          key={resultKey}
+                        >
                           <span className="extract-card-name">
+                            <input
+                              type="checkbox"
+                              className="extract-review-check"
+                              checked={selectedReviewKeys.has(r.field_key)}
+                              disabled={!r.field_id || batchBusy}
+                              onChange={(e) => {
+                                const next = new Set(selectedReviewKeys);
+                                if (e.target.checked) next.add(r.field_key);
+                                else next.delete(r.field_key);
+                                setSelectedReviewKeys(next);
+                              }}
+                              aria-label={`选择 ${r.field_name}`}
+                            />
                             {r.field_name}
                             <small className="extract-method-badge">{extractionMethodLabel(r.extraction_method)}</small>
                             {r.review_status && r.review_status !== "extracted" && (
@@ -869,10 +944,21 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
                               )}
                             </span>
                           )}
+                          {(r.page_no != null || r.confidence != null || r.source_text) && (
+                            <small className="extract-card-meta">
+                              {r.page_no != null && `第 ${r.page_no} 页`}
+                              {r.page_no != null && r.confidence != null && " · "}
+                              {r.confidence != null && `${Math.round(r.confidence * 100)}%`}
+                              {r.confidence != null && r.confidence < LOW_CONFIDENCE_THRESHOLD && " · 低置信"}
+                              {r.source_text &&
+                                ` · 来源：${r.source_text.slice(0, 40)}${r.source_text.length > 40 ? "…" : ""}`}
+                            </small>
+                          )}
                         </div>
                       );
                     })}
                   </div>
+                  </>
                 ) : showPendingFieldRows ? (
                   <div className="extract-card-list">
                     {fields.map((field) => (

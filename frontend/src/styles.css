@@ -1560,6 +1560,29 @@ h2 {
 .extract-card-value.editing .field-edit-input { flex: 1; }
 .extract-card-corrected { font-weight: 600; }
 .extract-card-original { display: block; font-size: 11px; color: #888; }
+.extract-card-item.result.low-confidence { box-shadow: inset 3px 0 var(--amber); }
+.extract-card-meta {
+  display: block;
+  width: 100%;
+  font-size: 11px;
+  color: #888;
+  margin-top: 2px;
+  white-space: normal;
+  line-height: 1.4;
+  word-break: break-all;
+}
+.extract-review-check {
+  margin-right: 8px;
+  flex: 0 0 auto;
+  align-self: center;
+}
+.extract-card-name .extract-method-badge { display: inline; margin-left: 6px; }
+.extract-review-toolbar {
+  display: flex;
+  gap: 8px;
+  margin: 6px 0;
+  flex-wrap: wrap;
+}
 
 .extract-card-value {
   display: grid;
