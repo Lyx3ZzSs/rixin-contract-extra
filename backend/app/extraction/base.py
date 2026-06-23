@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, model_validator
 
@@ -48,6 +48,22 @@ class OCRPageResult(BaseModel):
     def full_text(self) -> str:
         return "\n".join(b.text for b in self.blocks)
 
+    def to_markdown(self) -> str:
+        """Render this page's blocks as lightweight markdown.
+
+        Titles are bolded; ``table`` blocks are emitted verbatim (their
+        ``text`` is expected to already contain a markdown table when produced
+        by a layout-aware parser such as PP-StructureV3); other blocks are
+        plain text.
+        """
+        lines: list[str] = []
+        for block in self.blocks:
+            if block.block_type == "title":
+                lines.append(f"**{block.text}**")
+            else:
+                lines.append(block.text)
+        return "\n\n".join(lines)
+
 
 class OCRDetailedResult(BaseModel):
     """Full OCR result with per-page block-level detail."""
@@ -67,6 +83,20 @@ class OCRDetailedResult(BaseModel):
         for p in self.pages:
             out.extend(p.blocks)
         return out
+
+    PAGE_MARKER_TEMPLATE: ClassVar[str] = "<!-- page: {page_no} -->"
+
+    def to_markdown(self) -> str:
+        """Render the whole document as markdown with one page marker per page.
+
+        Markers are stable HTML comments so downstream chunking can split on
+        them without changing the LLM-visible text semantics.
+        """
+        parts: list[str] = []
+        for page in self.pages:
+            parts.append(self.PAGE_MARKER_TEMPLATE.format(page_no=page.page_no))
+            parts.append(page.to_markdown())
+        return "\n\n".join(parts)
 
 
 class FieldSpec(BaseModel):
