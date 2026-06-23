@@ -4,20 +4,23 @@ import type { CSSProperties } from "react";
 import loginBackground from "../picture/登录背景图.png";
 
 interface LoginPageProps {
-  onLogin: (username: string, password: string) => boolean;
+  onLogin: (apiKey: string) => Promise<boolean>;
 }
 
 export function LoginPage({ onLogin }: LoginPageProps) {
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
+  const [apiKey, setApiKeyState] = useState("");
   const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const ok = onLogin(username.trim(), password);
+    setBusy(true);
+    setError("");
+    const ok = await onLogin(apiKey.trim());
     if (!ok) {
-      setError("用户名或密码错误。");
+      setError("API Key 无效，请检查后重试。");
     }
+    setBusy(false);
   }
 
   return (
@@ -34,38 +37,26 @@ export function LoginPage({ onLogin }: LoginPageProps) {
         </div>
         <form onSubmit={handleSubmit}>
           <label className="field-row">
-            <span>用户名</span>
+            <span>API Key</span>
             <input
-              autoComplete="username"
+              autoComplete="off"
               autoFocus
-              name="username"
-              placeholder="请输入用户名"
-              value={username}
-              onChange={(event) => {
-                setUsername(event.target.value);
-                setError("");
-              }}
-            />
-          </label>
-          <label className="field-row">
-            <span>密码</span>
-            <input
-              autoComplete="current-password"
-              name="password"
-              placeholder="请输入密码"
+              name="apiKey"
+              placeholder="请输入 API Key"
               type="password"
-              value={password}
+              value={apiKey}
+              disabled={busy}
               onChange={(event) => {
-                setPassword(event.target.value);
+                setApiKeyState(event.target.value);
                 setError("");
               }}
             />
           </label>
-          <button className="primary-action login-action" type="submit">
-            登录系统
+          <button className="primary-action login-action" type="submit" disabled={busy || !apiKey.trim()}>
+            {busy ? "验证中…" : "登录系统"}
           </button>
           <p className={error ? "status-line error" : "status-line"} role="status">
-            {error || " "}
+            {error || " "}
           </p>
         </form>
       </section>

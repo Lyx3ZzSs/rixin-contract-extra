@@ -1,5 +1,6 @@
 import { createContext, useContext, useReducer, useEffect, type ReactNode } from "react";
 
+import { clearApiKey } from "./api";
 import { readRoute, type AppRoute } from "./routes";
 
 const AUTH_STORAGE_KEY = "rixin_contract_auth_user";
@@ -34,6 +35,7 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, currentUser: action.username };
     case "LOGOUT":
       window.localStorage.removeItem(AUTH_STORAGE_KEY);
+      clearApiKey();
       return { ...state, currentUser: null, isSidebarExpanded: false };
     case "SET_ROUTE":
       return { ...state, route: action.route };

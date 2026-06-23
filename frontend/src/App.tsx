@@ -10,17 +10,22 @@ import {
   navigateToExtractionRecords,
 } from "./lib/routes";
 import { useApp } from "./lib/state";
+import { clearApiKey, listFieldDefinitions, setApiKey } from "./lib/api";
 
 export function App() {
   const { state, dispatch } = useApp();
   const { currentUser, route, isSidebarExpanded, isExtractionMenuOpen } = state;
 
-  function handleLogin(username: string, password: string): boolean {
-    if (username === "admin" && password === "123456") {
-      dispatch({ type: "LOGIN", username });
+  async function handleLogin(apiKey: string): Promise<boolean> {
+    setApiKey(apiKey);
+    try {
+      await listFieldDefinitions();
+      dispatch({ type: "LOGIN", username: "API 用户" });
       return true;
+    } catch {
+      clearApiKey();
+      return false;
     }
-    return false;
   }
 
   function handleLogout() {
