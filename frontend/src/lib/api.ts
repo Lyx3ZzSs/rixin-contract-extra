@@ -26,10 +26,46 @@ export function toApiUrl(path: string): string {
 }
 
 // ────────────────────────────────────────────────────────────
+// API-Key auth
+// ────────────────────────────────────────────────────────────
+
+const API_KEY_STORAGE = "rixin_contract_api_key";
+
+export function getApiKey(): string | null {
+  return localStorage.getItem(API_KEY_STORAGE);
+}
+
+export function setApiKey(key: string): void {
+  localStorage.setItem(API_KEY_STORAGE, key);
+}
+
+export function clearApiKey(): void {
+  localStorage.removeItem(API_KEY_STORAGE);
+}
+
+function authHeaders(): Record<string, string> {
+  const key = getApiKey();
+  return key ? { "X-API-Key": key } : {};
+}
+
+function handle401(response: Response): void {
+  if (response.status === 401) {
+    clearApiKey();
+    if (window.location.pathname !== "/") {
+      window.location.assign("/");
+    } else {
+      window.location.reload();
+    }
+    throw new Error("未授权，请重新登录");
+  }
+}
+
+// ────────────────────────────────────────────────────────────
 // Generic fetch helpers
 // ────────────────────────────────────────────────────────────
 
 async function parseJsonResponse<T>(response: Response): Promise<T> {
+  handle401(response);
   if (!response.ok) {
     let message = `请求失败 (${response.status})`;
     try {
@@ -44,6 +80,7 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
 }
 
 async function parseApiResponse<T>(response: Response): Promise<T> {
+  handle401(response);
   // Upload endpoint returns ApiResponse<T>; other endpoints return T directly.
   const json = await parseJsonResponse<ApiResponse<T> | T>(response);
   if (json && typeof json === "object" && "code" in json && "message" in json && "data" in json) {
@@ -62,6 +99,7 @@ export async function prepareContract(file: File): Promise<UploadResponse> {
   formData.append("file", file);
   const response = await fetch(toApiUrl("/api/v1/contracts/prepare"), {
     method: "POST",
+    headers: authHeaders(),
     body: formData,
   });
   return parseApiResponse<UploadResponse>(response);
@@ -83,7 +121,7 @@ export async function startContractExtraction(
     : undefined;
   const response = await fetch(toApiUrl(`/api/v1/contracts/${contractId}/extract`), {
     method: "POST",
-    headers: body ? { "Content-Type": "application/json" } : undefined,
+    headers: body ? { "Content-Type": "application/json", ...authHeaders() } : authHeaders(),
     body,
   });
   return parseApiResponse<UploadResponse>(response);
@@ -94,12 +132,12 @@ export async function startContractExtraction(
 // ────────────────────────────────────────────────────────────
 
 export async function getTask(taskId: string): Promise<TaskDetail> {
-  const response = await fetch(toApiUrl(`/api/v1/tasks/${taskId}`));
+  const response = await fetch(toApiUrl(`/api/v1/tasks/${taskId}`), { headers: authHeaders() });
   return parseJsonResponse<TaskDetail>(response);
 }
 
 export async function getContractDetail(contractId: string): Promise<ContractDetail> {
-  const response = await fetch(toApiUrl(`/api/v1/contracts/${contractId}`));
+  const response = await fetch(toApiUrl(`/api/v1/contracts/${contractId}`), { headers: authHeaders() });
   return parseJsonResponse<ContractDetail>(response);
 }
 
@@ -116,7 +154,7 @@ export async function listContracts(
   if (status) params.set("status", status);
   params.set("page", String(page));
   params.set("page_size", String(pageSize));
-  const response = await fetch(toApiUrl(`/api/v1/contracts?${params.toString()}`));
+  const response = await fetch(toApiUrl(`/api/v1/contracts?${params.toString()}`), { headers: authHeaders() });
   return parseJsonResponse<ContractList>(response);
 }
 
@@ -125,7 +163,10 @@ export async function listContracts(
 // ────────────────────────────────────────────────────────────
 
 export function downloadContractFileUrl(contractId: string): string {
-  return toApiUrl(`/api/v1/contracts/${contractId}/files/download`);
+  let url = toApiUrl(`/api/v1/contracts/${contractId}/files/download`);
+  const key = getApiKey();
+  if (key) url += `?api_key=${encodeURIComponent(key)}`;
+  return url;
 }
 
 // ────────────────────────────────────────────────────────────
@@ -169,7 +210,7 @@ export interface FieldDefinitionItem {
 }
 
 export async function listFieldDefinitions(): Promise<FieldDefinitionItem[]> {
-  const response = await fetch(toApiUrl("/api/v1/field-definitions"));
+  const response = await fetch(toApiUrl("/api/v1/field-definitions"), { headers: authHeaders() });
   return parseJsonResponse<FieldDefinitionItem[]>(response);
 }
 
@@ -178,7 +219,7 @@ export async function createFieldDefinition(
 ): Promise<FieldDefinitionItem> {
   const response = await fetch(toApiUrl("/api/v1/field-definitions"), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(field),
   });
   return parseJsonResponse<FieldDefinitionItem>(response);
@@ -190,7 +231,7 @@ export async function updateFieldDefinition(
 ): Promise<FieldDefinitionItem> {
   const response = await fetch(toApiUrl(`/api/v1/field-definitions/${fieldKey}`), {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(updates),
   });
   return parseJsonResponse<FieldDefinitionItem>(response);
@@ -199,8 +240,10 @@ export async function updateFieldDefinition(
 export async function deleteFieldDefinition(fieldKey: string): Promise<void> {
   const response = await fetch(toApiUrl(`/api/v1/field-definitions/${fieldKey}`), {
     method: "DELETE",
+    headers: authHeaders(),
   });
   if (!response.ok) {
+    handle401(response);
     throw new Error(`删除字段失败 (${response.status})`);
   }
 }
@@ -208,6 +251,7 @@ export async function deleteFieldDefinition(fieldKey: string): Promise<void> {
 export async function resetFieldDefinitions(): Promise<FieldDefinitionItem[]> {
   const response = await fetch(toApiUrl("/api/v1/field-definitions/reset"), {
     method: "POST",
+    headers: authHeaders(),
   });
   return parseJsonResponse<FieldDefinitionItem[]>(response);
 }
@@ -234,7 +278,7 @@ export async function reviewField(
 ): Promise<FieldDetail> {
   const response = await fetch(toApiUrl(`/api/v1/contracts/${contractId}/fields/${fieldId}/review`), {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(body),
   });
   return parseJsonResponse<FieldDetail>(response);
@@ -246,7 +290,7 @@ export async function batchReviewFields(
 ): Promise<unknown[]> {
   const response = await fetch(toApiUrl(`/api/v1/contracts/${contractId}/review/batch`), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({
       reviewer_id: "web",
       items: items.map((it) => ({
@@ -274,7 +318,7 @@ export interface ReviewRecord {
 }
 
 export async function listReviewRecords(contractId: string): Promise<ReviewRecord[]> {
-  const response = await fetch(toApiUrl(`/api/v1/contracts/${contractId}/review/records`));
+  const response = await fetch(toApiUrl(`/api/v1/contracts/${contractId}/review/records`), { headers: authHeaders() });
   const data = await parseJsonResponse<{ items: ReviewRecord[]; total: number }>(response);
   return data.items;
 }

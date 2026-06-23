@@ -33,6 +33,18 @@ async def test_locked_mode_accepts_valid_key(locked_mode, client):
     assert resp.status_code != 401
 
 
+async def test_locked_mode_accepts_query_param_key(locked_mode, client):
+    # File downloads use <a href>/window.open and cannot set headers; the key
+    # is passed as ?api_key=. Header and query are interchangeable.
+    resp = await client.get("/api/v1/field-definitions?api_key=secret-1")
+    assert resp.status_code != 401
+
+
+async def test_locked_mode_rejects_wrong_query_param_key(locked_mode, client):
+    resp = await client.get("/api/v1/field-definitions?api_key=nope")
+    assert resp.status_code == 401
+
+
 async def test_health_is_unauthenticated(locked_mode, client):
     resp = await client.get("/health")
     assert resp.status_code == 200
