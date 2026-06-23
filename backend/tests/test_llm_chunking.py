@@ -1,4 +1,6 @@
 """Tests for page-aware chunking and per-chunk result merging."""
+import pytest
+
 from app.extraction.base import ExtractedField, ExtractionResult
 from app.extraction.llm.chunking import merge_results, split_by_pages
 
@@ -85,3 +87,66 @@ def test_merge_disjoint_keys_all_kept():
     b = ExtractionResult(fields=[_f("y", "2")])
     merged = merge_results([a, b])
     assert {f.field_key for f in merged.fields} == {"x", "y"}
+
+
+# --- QwenLLMProvider.extract_fields orchestration -----------------------
+#
+# These cover the multi-chunk → merge path and the all-chunks-failed →
+# RuntimeError path. The real Instructor client is never called: ``_extract_single``
+# is monkeypatched on a provider instance.
+
+def _multi_page_markdown(pages: int) -> str:
+    return "\n\n".join(f"<!-- page: {n} -->\n\npage {n} body" for n in range(1, pages + 1))
+
+
+def test_qwen_extract_fields_merges_chunks_picking_higher_confidence(monkeypatch):
+    from app.extraction.base import FieldSpec
+    from app.extraction.llm.qwen import QwenLLMProvider
+
+    provider = QwenLLMProvider()
+
+    # >6 pages ⇒ split_by_pages yields 2 chunks (6-page window, 1-page overlap).
+    md = _multi_page_markdown(8)
+
+    # Chunk 0 (pages 1-6) returns party-a at 0.7; chunk 1 (pages 6-8) returns
+    # party-a at 0.95 — the merger must pick the higher-confidence value.
+    returns = [
+        ExtractionResult(fields=[ExtractedField(
+            field_key="party-a-name", value="LOW-CONF-NAME", confidence=0.7, page_no=1,
+        )]),
+        ExtractionResult(fields=[ExtractedField(
+            field_key="party-a-name", value="HIGH-CONF-NAME", confidence=0.95, page_no=6,
+        )]),
+    ]
+    calls = {"i": 0}
+
+    def fake_extract_single(chunk_text, contract_type, field_definitions):
+        idx = min(calls["i"], len(returns) - 1)
+        calls["i"] += 1
+        return returns[idx]
+
+    monkeypatch.setattr(provider, "_extract_single", fake_extract_single)
+
+    fields = [FieldSpec(field_key="party-a-name", field_name="甲方名称")]
+    result = provider.extract_fields(md, contract_type=None, field_definitions=fields)
+    party_a = next(f for f in result.fields if f.field_key == "party-a-name")
+    assert party_a.value == "HIGH-CONF-NAME"
+    assert party_a.confidence == 0.95
+    assert calls["i"] == 2  # both chunks processed
+
+
+def test_qwen_extract_fields_raises_when_all_chunks_fail(monkeypatch):
+    from app.extraction.base import FieldSpec
+    from app.extraction.llm.qwen import QwenLLMProvider
+
+    provider = QwenLLMProvider()
+    md = _multi_page_markdown(8)
+
+    def always_fail(chunk_text, contract_type, field_definitions):
+        raise RuntimeError("chunk failed")
+
+    monkeypatch.setattr(provider, "_extract_single", always_fail)
+
+    fields = [FieldSpec(field_key="party-a-name", field_name="甲方名称")]
+    with pytest.raises(RuntimeError):
+        provider.extract_fields(md, contract_type=None, field_definitions=fields)

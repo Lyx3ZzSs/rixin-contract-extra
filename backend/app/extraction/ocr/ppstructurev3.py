@@ -45,7 +45,12 @@ class PPStructureV3Provider(OCRProvider):
     def __init__(self) -> None:
         self._url = settings.ppstructurev3_url
         self._timeout = settings.ppocr_timeout  # reuse the existing timeout knob
-        self._client = httpx.Client(timeout=self._timeout)
+        self._client: httpx.Client | None = None
+
+    def _get_client(self) -> httpx.Client:
+        if self._client is None:
+            self._client = httpx.Client(timeout=self._timeout)
+        return self._client
 
     # ------------------------------------------------------------------
     # OCRProvider interface
@@ -64,7 +69,7 @@ class PPStructureV3Provider(OCRProvider):
         last_exc: Exception | None = None
         for attempt in range(_HTTP_RETRIES + 1):
             try:
-                resp = self._client.post(url, json=payload)
+                resp = self._get_client().post(url, json=payload)
                 resp.raise_for_status()
                 return resp.json()
             except httpx.HTTPError as exc:

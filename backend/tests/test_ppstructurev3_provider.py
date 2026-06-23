@@ -4,28 +4,25 @@ The provider is given a captured response payload (the contract a PaddleX
 PP-StructureV3 endpoint must satisfy) and must turn it into an
 ``OCRDetailedResult`` with correct block types, page numbers and table text.
 """
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
+import httpx
 import pytest
 
 from app.extraction.ocr.ppstructurev3 import PPStructureV3Provider
 
 
 @pytest.fixture(autouse=True)
-def _stub_file_path(tmp_path, monkeypatch):
-    """``extract_detailed`` reads the file before the mocked ``_http_post``.
-
-    The brief's tests pass ``"/tmp/x.pdf"`` as a placeholder path; provide a
-    real readable file so ``_build_payload`` succeeds and the fixture-driven
-    ``_http_post`` mock is actually reached. This is test scaffolding only —
-    it does not alter any assertion in the brief.
+def _stub_build_payload(monkeypatch):
+    """``extract_detailed`` calls ``_build_payload`` before the mocked
+    ``_http_post``. The brief's tests pass placeholder paths like
+    ``"/tmp/x.pdf"``; stub ``_build_payload`` so no real file read occurs.
     """
-    stub = tmp_path / "x.pdf"
-    stub.write_bytes(b"%PDF-1.4 stub")
     monkeypatch.setattr(
         "app.extraction.ocr.ppstructurev3.PPStructureV3Provider._build_payload",
         staticmethod(lambda file_path, file_type: {"file": "stub", "fileType": 0}),
     )
+
 
 # Representative PP-StructureV3 response (the contract this parser supports).
 _FIXTURE = {
@@ -85,24 +82,23 @@ def test_empty_regions_page_is_skipped_silently():
 
 
 def test_malformed_payload_raises():
-    import pytest
     with pytest.raises(RuntimeError):
         _provider_returning({"unexpected": True}).extract_detailed("/tmp/x.pdf", "pdf")
 
 
 def test_http_failure_retried_then_raises():
-    import pytest
-    import httpx
     p = PPStructureV3Provider()
     call_count = {"n": 0}
 
-    def boom(*args, **kwargs):
-        call_count["n"] += 1
-        raise httpx.HTTPError("boom")
+    class _FakeClient:
+        def post(self, *args, **kwargs):
+            call_count["n"] += 1
+            raise httpx.HTTPError("boom")
 
-    # Retry logic lives INSIDE _http_post (which calls self._client.post), so
-    # mock the client's post — not _http_post — to actually exercise the loop.
-    p._client.post = boom  # type: ignore[method-assign]
+    # Retry logic lives INSIDE _http_post (which calls self._get_client().post),
+    # so mock _get_client to return a fake client whose .post always raises —
+    # this actually exercises the retry loop.
+    p._get_client = lambda: _FakeClient()  # type: ignore[method-assign]
     with pytest.raises(RuntimeError):
         p.extract_detailed("/tmp/x.pdf", "pdf")
     assert call_count["n"] >= 2  # retried (_HTTP_RETRIES + 1 attempts)
