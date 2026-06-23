@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     upload_dir: str = "uploads/contracts"
     max_file_size: int = 100 * 1024 * 1024  # 100 MB
 
+    # Minimum auth: comma-separated valid API keys. Empty = open mode (dev);
+    # set in production to require an X-API-Key header on all /api/v1 routes.
+    app_api_keys: str = ""
+    # CORS: comma-separated allowed origins. Empty = allow any (credentials off).
+    allowed_origins: str = ""
+
     model_config = {
         "env_file": (
             # Resolve .env relative to the backend dir (parent of app/),

@@ -82,6 +82,12 @@ async def lifespan(app: FastAPI):
             exc_info=True,
         )
 
+    if not settings.app_api_keys:
+        logger.warning(
+            "AUTH DISABLED: APP_API_KEYS is empty — all /api/v1 routes are open. "
+            "Set APP_API_KEYS in production to require an X-API-Key header."
+        )
+
     from app.worker import run_worker
     worker_task = asyncio.create_task(run_worker())
     app.state.task_worker_task = worker_task
@@ -102,10 +108,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_origins = (
+    [o.strip() for o in settings.allowed_origins.split(",") if o.strip()]
+    if settings.allowed_origins else ["*"]
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_origins,
+    allow_credentials=bool(settings.allowed_origins),  # credentials only with explicit origins
     allow_methods=["*"],
     allow_headers=["*"],
 )
