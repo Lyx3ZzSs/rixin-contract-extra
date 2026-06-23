@@ -228,10 +228,12 @@ async def _run_extraction_pipeline_inner(
                 raise ValueError("OCR result is not ready")
 
             from app.services.extraction_service import extract_and_save
+            # Feed page-marked, table-structured markdown (not flat text) so the
+            # LLM sees table structure and chunking can split on page markers.
             extraction = await extract_and_save(
                 db,
                 contract_id,
-                ocr_result.full_text,
+                ocr_result.to_markdown(),
                 field_definitions=field_definitions,
             )
             await _raise_if_cancelled(db, task_id)

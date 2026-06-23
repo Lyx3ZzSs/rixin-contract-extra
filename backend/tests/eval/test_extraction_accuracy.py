@@ -40,3 +40,17 @@ async def test_mock_extraction_accuracy_runs():
     assert set(report) >= {"tp", "fp", "fn", "precision", "recall", "f1", "per_field"}
     assert 0.0 <= report["f1"] <= 1.0
     assert all(k in report["per_field"] for k in _GOLDEN if k in extracted)
+
+
+@pytest.mark.eval
+async def test_pipeline_input_markdown_has_page_markers():
+    """Input-contract guard for the Task 5 wiring change.
+
+    The markdown the pipeline now feeds to extraction (OCRDetailedResult.to_markdown())
+    must carry page markers — Task 3 chunking splits on them. This pins that
+    contract. The wiring itself (pipeline.py passing to_markdown() to
+    extract_and_save) is verified end-to-end by the existing extraction-pipeline
+    test in test_task_api.py, which must stay green after the one-line change.
+    """
+    from app.extraction.ocr.mock import MOCK_DETAILED_RESULT
+    assert "<!-- page:" in MOCK_DETAILED_RESULT.to_markdown()
