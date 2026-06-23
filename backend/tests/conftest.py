@@ -95,3 +95,20 @@ trailer
 startxref
 190
 %%EOF"""
+
+
+# ---------------------------------------------------------------------------
+# Eval tests: skipped unless explicitly selected with `-m eval`.
+# ---------------------------------------------------------------------------
+def pytest_collection_modifyitems(config, items):
+    marker_expr = config.getoption("-m") or ""
+    eval_selected = "eval" in marker_expr
+    skip_eval = pytest.mark.skip(
+        reason="eval tests run only with -m eval (need real/configured providers)",
+    )
+    for item in items:
+        # Use the explicit marker — NOT membership in ``item.keywords``,
+        # which also contains the package path ("tests.eval.…") and would
+        # wrongly skip the pure metric unit tests in tests/eval/.
+        if item.get_closest_marker("eval") is not None and not eval_selected:
+            item.add_marker(skip_eval)

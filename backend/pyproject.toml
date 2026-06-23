@@ -39,3 +39,6 @@ include = ["app*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "eval: end-to-end extraction accuracy tests (run explicitly with: -m eval)",
+]
