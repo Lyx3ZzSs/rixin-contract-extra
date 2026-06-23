@@ -20,6 +20,7 @@ from app.extraction.base import (
     RawExtractionResult,
 )
 from app.extraction.llm.base import LLMProvider
+from app.extraction.llm.chunking import merge_results, split_by_pages
 
 logger = logging.getLogger(__name__)
 
@@ -172,24 +173,42 @@ class QwenLLMProvider(LLMProvider):
         contract_type: str | None = None,
         field_definitions: list | None = None,
     ) -> ExtractionResult:
-        """Extract fields using Instructor for Pydantic-validated output.
+        """Extract fields, chunking long contracts by page.
 
-        Builds the prompt from request-scoped field definitions, calls the LLM
-        via Instructor, and converts the validated RawExtractionResult into
-        domain ExtractionResult.
+        Single-chunk input (short contracts, or text without page markers)
+        takes the original one-call path — byte-identical behavior. Long
+        contracts are split into overlapping page windows; each window is
+        extracted independently and the results merged.
         """
         if not field_definitions:
             raise ValueError("Field definitions are required for Qwen extraction")
 
-        user_msg = _build_dynamic_prompt(field_definitions, full_text, contract_type)
+        chunks = split_by_pages(full_text, pages_per_chunk=settings.llm_chunk_pages)
+        if len(chunks) <= 1:
+            return self._extract_single(full_text, contract_type, field_definitions)
 
+        per_chunk: list[ExtractionResult] = []
+        for chunk in chunks:
+            try:
+                per_chunk.append(self._extract_single(chunk, contract_type, field_definitions))
+            except Exception as exc:  # one bad chunk must not sink the whole doc
+                logger.warning("Chunk extraction failed, skipping chunk: %s", exc)
+        if not per_chunk:
+            raise RuntimeError("All chunk extractions failed")
+        return merge_results(per_chunk)
+
+    def _extract_single(
+        self,
+        full_text: str,
+        contract_type: str | None,
+        field_definitions: list,
+    ) -> ExtractionResult:
+        """Single LLM call — the pre-chunking extraction path."""
+        user_msg = _build_dynamic_prompt(field_definitions, full_text, contract_type)
         system_msg = (
             "你是一位资深合同审核专家，擅长从合同文本中精准提取结构化信息。"
         )
-
         logger.debug("Extraction prompt (first 500 chars): %s", user_msg[:500])
-
-        # --- Call LLM via Instructor ---
         try:
             raw: RawExtractionResult = self._client.chat.completions.create(
                 model=settings.llm_model_name,
@@ -206,9 +225,7 @@ class QwenLLMProvider(LLMProvider):
             logger.error("Instructor extraction failed: %s", exc, exc_info=True)
             raise RuntimeError(f"Instructor extraction failed: {exc}") from exc
 
-        # --- Convert RawExtractionResult → ExtractionResult ---
         fields = _convert_raw_fields(raw, field_definitions)
-
         return ExtractionResult(
             contract_type=raw.contract_type or contract_type,
             contract_type_confidence=raw.contract_type_confidence,

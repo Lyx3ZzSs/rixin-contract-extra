@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.1
     llm_timeout: int = 120
 
+    # Long-contract chunking: pages per LLM call (1-page overlap between chunks).
+    llm_chunk_pages: int = 6
+
     # Upload
     upload_dir: str = "uploads/contracts"
     max_file_size: int = 100 * 1024 * 1024  # 100 MB
