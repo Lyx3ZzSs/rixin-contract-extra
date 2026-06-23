@@ -1543,6 +1543,23 @@ h2 {
   font-weight: 800;
   line-height: 1;
 }
+.extract-review-badge {
+  display: inline-block;
+  margin-top: 3px;
+  margin-left: 6px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  background: var(--teal-soft);
+  color: var(--teal-strong);
+}
+.extract-review-badge.corrected { background: var(--amber); color: #fff; }
+.extract-review-badge.approved { background: #2e7d32; color: #fff; }
+.extract-review-badge.rejected { background: var(--red); color: #fff; }
+.extract-card-value.editing { display: flex; gap: 6px; align-items: center; }
+.extract-card-value.editing .field-edit-input { flex: 1; }
+.extract-card-corrected { font-weight: 600; }
+.extract-card-original { display: block; font-size: 11px; color: #888; }
 
 .extract-card-value {
   display: grid;

@@ -11,6 +11,7 @@ import {
   getContractDetail,
   getTask,
   prepareContract,
+  reviewField,
   startContractExtraction,
 } from "../lib/api";
 import { downloadBatchExtractionResultsWorkbook } from "../lib/excelExport";
@@ -179,6 +180,9 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
     field_name: "",
     description: "",
   });
+  const [reviewingFieldKey, setReviewingFieldKey] = useState<string | null>(null);
+  const [reviewDraft, setReviewDraft] = useState<string>("");
+  const [reviewSavingKey, setReviewSavingKey] = useState<string | null>(null);
 
   const updateItem = useCallback((itemId: string, patch: Partial<BatchFileItem>) => {
     setItems((currentItems) =>
@@ -278,6 +282,28 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
       setFieldActionMessage(`已更新字段：${nextName}`);
     } catch { /* ignore */ }
     cancelFieldEdit();
+  }
+
+  async function saveFieldReview(fieldKey: string, fieldId: string) {
+    if (!fieldId || !activeItem?.upload || !activeItem?.results) return;
+    setReviewSavingKey(fieldKey);
+    try {
+      const updated = await reviewField(activeItem.upload.contract_id, fieldId, {
+        action: "modify",
+        new_value: reviewDraft,
+      });
+      const remapped = fieldDetailToExtractionFieldValue(updated);
+      const nextResults = activeItem.results.map((r) =>
+        r.field_key === fieldKey ? { ...r, ...remapped } : r,
+      );
+      updateItem(activeItem.id, { results: nextResults });
+      setReviewingFieldKey(null);
+    } catch (err) {
+      console.error("review save failed", err);
+      alert("复核保存失败，请重试");
+    } finally {
+      setReviewSavingKey(null);
+    }
   }
 
   async function openFieldLibraryPicker() {
@@ -774,23 +800,75 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
                           <span className="extract-card-name">
                             {r.field_name}
                             <small className="extract-method-badge">{extractionMethodLabel(r.extraction_method)}</small>
+                            {r.review_status && r.review_status !== "extracted" && (
+                              <small className={`extract-review-badge ${r.review_status}`}>
+                                {reviewStatusLabel(r.review_status)}
+                              </small>
+                            )}
                           </span>
-                          <span
-                            className={`extract-card-value${r.status === "not_found" ? " empty" : r.status === "error" ? " error" : ""}${isExpanded ? " expanded" : ""}`}
-                            title={valueText}
-                          >
-                            <span className="extract-card-value-text">{valueText}</span>
-                            {canExpand && (
+                          {reviewingFieldKey === r.field_key ? (
+                            <span className="extract-card-value editing">
+                              <input
+                                className="field-edit-input"
+                                value={reviewDraft}
+                                onChange={(e) => setReviewDraft(e.target.value)}
+                                autoFocus
+                              />
                               <button
                                 type="button"
                                 className="extract-value-toggle"
-                                aria-expanded={isExpanded}
-                                onClick={() => toggleResultExpansion(resultKey)}
+                                disabled={reviewSavingKey === r.field_key}
+                                onClick={() => saveFieldReview(r.field_key, r.field_id)}
                               >
-                                {isExpanded ? "收起" : "展开"}
+                                {reviewSavingKey === r.field_key ? "保存中" : "保存"}
                               </button>
-                            )}
-                          </span>
+                              <button
+                                type="button"
+                                className="extract-value-toggle"
+                                onClick={() => setReviewingFieldKey(null)}
+                              >
+                                取消
+                              </button>
+                            </span>
+                          ) : (
+                            <span
+                              className={`extract-card-value${r.status === "not_found" ? " empty" : r.status === "error" ? " error" : ""}${isExpanded ? " expanded" : ""}`}
+                              title={valueText}
+                            >
+                              <span className="extract-card-value-text">
+                                {r.reviewed_value ? (
+                                  <>
+                                    <span className="extract-card-corrected">{r.reviewed_value}</span>
+                                    <small className="extract-card-original">原值：{valueText}</small>
+                                  </>
+                                ) : (
+                                  valueText
+                                )}
+                              </span>
+                              {r.status === "found" && r.field_id && (
+                                <button
+                                  type="button"
+                                  className="extract-value-toggle"
+                                  onClick={() => {
+                                    setReviewingFieldKey(r.field_key);
+                                    setReviewDraft(r.reviewed_value || r.value);
+                                  }}
+                                >
+                                  修正
+                                </button>
+                              )}
+                              {canExpand && (
+                                <button
+                                  type="button"
+                                  className="extract-value-toggle"
+                                  aria-expanded={isExpanded}
+                                  onClick={() => toggleResultExpansion(resultKey)}
+                                >
+                                  {isExpanded ? "收起" : "展开"}
+                                </button>
+                              )}
+                            </span>
+                          )}
                         </div>
                       );
                     })}
@@ -1183,6 +1261,16 @@ function extractionMethodLabel(method: ExtractionFieldValue["extraction_method"]
     return "语义提取";
   }
   return "提取";
+}
+
+function reviewStatusLabel(status: string): string {
+  switch (status) {
+    case "corrected": return "已修正";
+    case "approved": return "已通过";
+    case "rejected": return "已驳回";
+    case "reviewed": return "已复核";
+    default: return "";
+  }
 }
 
 function getExtractionResultIdentity(result: ExtractionFieldValue): string {
