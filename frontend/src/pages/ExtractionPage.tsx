@@ -1165,8 +1165,12 @@ function buildFieldValues(fields: FieldDefinitionItem[], backendFields: FieldDet
       value: "",
       confidence: 0,
       source_snippet: "",
+      source_text: null,
+      page_no: null,
       status: "not_found" as const,
       extraction_method: null,
+      review_status: "extracted",
+      reviewed_value: null,
     };
   });
 }

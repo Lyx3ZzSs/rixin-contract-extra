@@ -9,8 +9,12 @@ export interface ExtractionFieldValue {
   value: string;
   confidence: number;
   source_snippet: string;
+  source_text: string | null;
+  page_no: number | null;
   status: ExtractionFieldStatus;
   extraction_method?: "explicit" | "semantic" | null;
+  review_status: string;
+  reviewed_value: string | null;
 }
 
 export interface ExtractionTaskResponse {
@@ -95,14 +99,18 @@ export interface FieldDetail {
   field_name: string;
   field_key: string;
   value: string | null;
+  value_type: string;
   source_text: string | null;
   page_no: number | null;
   confidence: number | null;
   source_paragraph_id?: number | null;
   source_block_start?: number | null;
   source_block_end?: number | null;
-  extract_method: string;
+  extract_method?: string;
   review_status: string;
+  reviewed_value: string | null;
+  reviewer_id: string | null;
+  reviewed_at: string | null;
 }
 
 export interface ClauseDetail {
@@ -157,14 +165,7 @@ export interface TaskDetail {
 
 
 export function fieldDetailToExtractionFieldValue(f: FieldDetail): ExtractionFieldValue {
-  let status: ExtractionFieldStatus;
-  if (f.value && (f.confidence ?? 0) >= 0.5) {
-    status = "found";
-  } else if (f.value) {
-    status = "found";
-  } else {
-    status = "not_found";
-  }
+  const status: ExtractionFieldStatus = f.value ? "found" : "not_found";
 
   let extraction_method: "explicit" | "semantic" | null = null;
   if (f.extract_method === "rule" || f.extract_method === "regex") {
@@ -173,15 +174,19 @@ export function fieldDetailToExtractionFieldValue(f: FieldDetail): ExtractionFie
     extraction_method = "semantic";
   }
 
-    return {
+  return {
     field_id: f.id,
     field_name: f.field_name,
     field_key: f.field_key,
     value: f.value ?? "",
     confidence: f.confidence ?? 0,
     source_snippet: f.source_text ?? "",
+    source_text: f.source_text,
+    page_no: f.page_no,
     status,
     extraction_method,
+    review_status: f.review_status,
+    reviewed_value: f.reviewed_value,
   };
 }
 
