@@ -4,6 +4,7 @@ import type {
   ContractDetail,
   ContractList,
   ExtractionRecordSummary,
+  FieldDetail,
   TaskDetail,
   UploadResponse,
 } from "../types";
@@ -209,4 +210,71 @@ export async function resetFieldDefinitions(): Promise<FieldDefinitionItem[]> {
     method: "POST",
   });
   return parseJsonResponse<FieldDefinitionItem[]>(response);
+}
+
+// --- Review (human-in-the-loop) ---
+
+export interface FieldReviewRequest {
+  action: "modify" | "approve" | "reject";
+  new_value?: string;
+  comment?: string;
+}
+
+export interface BatchReviewItem {
+  field_id: string;
+  action: "modify" | "approve" | "reject";
+  new_value?: string;
+  comment?: string;
+}
+
+export async function reviewField(
+  contractId: string,
+  fieldId: string,
+  body: FieldReviewRequest,
+): Promise<FieldDetail> {
+  const response = await fetch(toApiUrl(`/api/v1/contracts/${contractId}/fields/${fieldId}/review`), {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return parseJsonResponse<FieldDetail>(response);
+}
+
+export async function batchReviewFields(
+  contractId: string,
+  items: BatchReviewItem[],
+): Promise<unknown[]> {
+  const response = await fetch(toApiUrl(`/api/v1/contracts/${contractId}/review/batch`), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      reviewer_id: "web",
+      items: items.map((it) => ({
+        target_type: "field",
+        target_id: it.field_id,
+        action: it.action,
+        new_value: it.new_value,
+        comment: it.comment,
+      })),
+    }),
+  });
+  return parseJsonResponse<unknown[]>(response);
+}
+
+export interface ReviewRecord {
+  id: string;
+  target_type: string;
+  target_id: string;
+  action: string;
+  old_value: string | null;
+  new_value: string | null;
+  comment: string | null;
+  reviewer_id: string | null;
+  created_at: string;
+}
+
+export async function listReviewRecords(contractId: string): Promise<ReviewRecord[]> {
+  const response = await fetch(toApiUrl(`/api/v1/contracts/${contractId}/review/records`));
+  const data = await parseJsonResponse<{ items: ReviewRecord[]; total: number }>(response);
+  return data.items;
 }
