@@ -160,6 +160,25 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const [semanticEnabled, setSemanticEnabled] = useState<Record<string, boolean>>({});
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const exportMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!exportMenuOpen) return;
+    function onDown(e: MouseEvent) {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(e.target as Node)) {
+        setExportMenuOpen(false);
+      }
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setExportMenuOpen(false);
+    }
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [exportMenuOpen]);
 
   useEffect(() => {
     setFieldLibraryState("loading");
@@ -748,7 +767,7 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
           </ol>
         </div>
         {hasBatchResults ? (
-          <div className="extract-export-menu">
+          <div className="extract-export-menu" ref={exportMenuRef}>
             <button
               type="button"
               className="extract-flow-submit extract-value-toggle"

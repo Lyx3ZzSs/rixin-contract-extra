@@ -254,9 +254,14 @@ function ExtractionTaskDetail({
           type="button"
           className="extract-value-toggle"
           onClick={() => {
-            const exportFields = task.fields.map((f) => ({ field_key: f.id, field_name: f.name }));
+            const exportFields = task.results.map((r) => ({ field_key: r.field_key, field_name: r.field_name }));
             const rows = [
-              { fileName: task.filename || fallbackRecord?.filename || "提取结果", status: task.status, error: task.errors.join("; "), results: task.results },
+              {
+                fileName: task.filename || fallbackRecord?.filename || "提取结果",
+                status: "found" as const,
+                error: task.errors.join("; "),
+                results: task.results,
+              },
             ];
             downloadExtractionResultsJson(task.filename || "提取结果", exportFields, rows);
           }}
