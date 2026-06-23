@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { downloadContractFileUrl, getContractDetail, listContracts, listReviewRecords, reviewField } from "../lib/api";
 import type { ReviewRecord } from "../lib/api";
+import { downloadExtractionResultsJson } from "../lib/excelExport";
 import { reviewStatusLabel } from "../lib/reviewStatus";
 import { contractBriefToExtractionRecordSummary, contractDetailToExtractionTaskResponse } from "../types";
 import type { ExtractionFieldValue, ExtractionRecordSummary, ExtractionTaskResponse, TaskStatus } from "../types";
@@ -248,6 +249,19 @@ function ExtractionTaskDetail({
         <p>{task.task_id}</p>
         <button type="button" className="extract-value-toggle" onClick={onToggleHistory}>
           复核历史 ({reviewRecords.length})
+        </button>
+        <button
+          type="button"
+          className="extract-value-toggle"
+          onClick={() => {
+            const exportFields = task.fields.map((f) => ({ field_key: f.id, field_name: f.name }));
+            const rows = [
+              { fileName: task.filename || fallbackRecord?.filename || "提取结果", status: task.status, error: task.errors.join("; "), results: task.results },
+            ];
+            downloadExtractionResultsJson(task.filename || "提取结果", exportFields, rows);
+          }}
+        >
+          导出 JSON
         </button>
       </div>
       <div className="extraction-detail-meta">

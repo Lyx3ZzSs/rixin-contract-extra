@@ -15,7 +15,11 @@ import {
   reviewField,
   startContractExtraction,
 } from "../lib/api";
-import { downloadBatchExtractionResultsWorkbook } from "../lib/excelExport";
+import {
+  downloadBatchExtractionResultsWorkbook,
+  downloadExtractionResultsCsv,
+  downloadExtractionResultsJson,
+} from "../lib/excelExport";
 import { fieldDetailToExtractionFieldValue } from "../types";
 import { readExtractionFieldLibrary } from "../lib/extractionFieldLibrary";
 import { reviewStatusLabel } from "../lib/reviewStatus";
@@ -155,6 +159,7 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
   const [fieldActionMessage, setFieldActionMessage] = useState("");
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const [semanticEnabled, setSemanticEnabled] = useState<Record<string, boolean>>({});
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
 
   useEffect(() => {
     setFieldLibraryState("loading");
@@ -692,14 +697,19 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
     });
   }
 
-  function handleExport() {
+  function doExport(fmt: "xlsx" | "csv" | "json") {
     if (!hasBatchResults) return;
-    downloadBatchExtractionResultsWorkbook("批量合同提取结果", fields, items.map((item) => ({
+    const exportFields = fields.map((f) => ({ field_key: f.field_key, field_name: f.field_name }));
+    const rows = items.map((item) => ({
       fileName: item.file.name,
       status: item.extractionStatus,
       error: item.error,
       results: item.results,
-    })));
+    }));
+    const baseName = "批量合同提取结果";
+    if (fmt === "xlsx") downloadBatchExtractionResultsWorkbook(baseName, fields, rows);
+    else if (fmt === "csv") downloadExtractionResultsCsv(baseName, exportFields, rows);
+    else downloadExtractionResultsJson(baseName, exportFields, rows);
   }
 
   const activeFieldCount = fields.length;
@@ -737,19 +747,34 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
             </li>
           </ol>
         </div>
-        <button
+        {hasBatchResults ? (
+          <div className="extract-export-menu">
+            <button
+              type="button"
+              className="extract-flow-submit extract-value-toggle"
+              onClick={() => setExportMenuOpen((v) => !v)}
+            >
+              导出 ▾
+            </button>
+            {exportMenuOpen && (
+              <div className="extract-export-menu-items">
+                <button type="button" onClick={() => { doExport("xlsx"); setExportMenuOpen(false); }}>Excel (.xlsx)</button>
+                <button type="button" onClick={() => { doExport("csv"); setExportMenuOpen(false); }}>CSV</button>
+                <button type="button" onClick={() => { doExport("json"); setExportMenuOpen(false); }}>JSON</button>
+              </div>
+            )}
+          </div>
+        ) : (
+          <button
             className="extract-flow-submit"
             type="button"
-            onClick={hasBatchResults ? handleExport : handleStartExtraction}
-            disabled={isExtracting || (!hasBatchResults && activeFieldCount === 0)}
-            title={
-              !hasBatchResults && activeFieldCount === 0
-                  ? "请先添加至少一个提取字段"
-                  : undefined
-            }
+            onClick={handleStartExtraction}
+            disabled={isExtracting || activeFieldCount === 0}
+            title={activeFieldCount === 0 ? "请先添加至少一个提取字段" : undefined}
           >
-            {isExtracting ? "正在提取..." : hasBatchResults ? "导出" : "开始提取"}
+            {isExtracting ? "正在提取..." : "开始提取"}
           </button>
+        )}
       </header>
 
       <div className="extract-flow-body">

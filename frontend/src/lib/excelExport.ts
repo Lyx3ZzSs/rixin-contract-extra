@@ -120,6 +120,108 @@ export function downloadBatchExtractionResultsWorkbook(
   URL.revokeObjectURL(url);
 }
 
+function csvEscape(value: string | number): string {
+  const s = String(value ?? "");
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+export function buildExtractionResultsCsv(
+  fields: { field_key: string; field_name: string }[],
+  rows: BatchExtractionWorkbookRow[],
+): string {
+  const headers = ["序号", "文件名", ...fields.map((f) => f.field_name), "处理状态", "错误信息"];
+  const lines: string[] = [headers.map(csvEscape).join(",")];
+  rows.forEach((row, index) => {
+    const byKey = new Map((row.results ?? []).map((r) => [r.field_key, r]));
+    const values = [
+      index + 1,
+      row.fileName,
+      ...fields.map((f) => {
+        const r = byKey.get(f.field_key);
+        return r?.reviewed_value || (r?.status === "found" ? r.value : "") || "";
+      }),
+      workbookStatusLabel(row.status),
+      row.error || "",
+    ];
+    lines.push(values.map(csvEscape).join(","));
+  });
+  return "﻿" + lines.join("\n"); // BOM for Excel CJK
+}
+
+export function buildExtractionResultsJson(
+  fields: { field_key: string; field_name: string }[],
+  rows: BatchExtractionWorkbookRow[],
+): string {
+  const byKey = (results: BatchExtractionWorkbookRow["results"]) =>
+    new Map((results ?? []).map((r) => [r.field_key, r]));
+  return JSON.stringify(
+    rows.map((row, index) => {
+      const m = byKey(row.results);
+      return {
+        index: index + 1,
+        fileName: row.fileName,
+        status: row.status,
+        error: row.error || null,
+        fields: Object.fromEntries(
+          fields.map((f) => {
+            const r = m.get(f.field_key);
+            return [
+              f.field_key,
+              r
+                ? {
+                    value: r.value,
+                    reviewed_value: r.reviewed_value ?? null,
+                    confidence: r.confidence ?? null,
+                    page_no: r.page_no ?? null,
+                    review_status: r.review_status ?? null,
+                  }
+                : null,
+            ];
+          }),
+        ),
+      };
+    }),
+    null,
+    2,
+  );
+}
+
+function downloadText(filename: string, content: string, mime: string): void {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+export function downloadExtractionResultsCsv(
+  fileName: string,
+  fields: { field_key: string; field_name: string }[],
+  rows: BatchExtractionWorkbookRow[],
+): void {
+  downloadText(
+    `${fileName.replace(/\.[^.]+$/, "")}_提取结果.csv`,
+    buildExtractionResultsCsv(fields, rows),
+    "text/csv;charset=utf-8",
+  );
+}
+
+export function downloadExtractionResultsJson(
+  fileName: string,
+  fields: { field_key: string; field_name: string }[],
+  rows: BatchExtractionWorkbookRow[],
+): void {
+  downloadText(
+    `${fileName.replace(/\.[^.]+$/, "")}_提取结果.json`,
+    buildExtractionResultsJson(fields, rows),
+    "application/json",
+  );
+}
+
 function buildSheetXml(headers: Array<string | number>, rows: Array<Array<string | number>>): string {
   const colCount = headers.length;
   const lastCol = columnName(colCount);

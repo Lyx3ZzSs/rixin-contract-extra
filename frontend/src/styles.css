@@ -4848,3 +4848,39 @@ h2 {
     animation: none;
   }
 }
+
+.extract-export-menu {
+  position: relative;
+  display: inline-block;
+}
+
+.extract-export-menu-items {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  padding: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  min-width: 120px;
+}
+
+.extract-export-menu-items button {
+  text-align: left;
+  padding: 4px 10px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  border-radius: 4px;
+  font-size: 13px;
+  color: inherit;
+}
+
+.extract-export-menu-items button:hover {
+  background: var(--teal-soft);
+}
