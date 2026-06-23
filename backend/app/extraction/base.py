@@ -49,20 +49,10 @@ class OCRPageResult(BaseModel):
         return "\n".join(b.text for b in self.blocks)
 
     def to_markdown(self) -> str:
-        """Render this page's blocks as lightweight markdown.
-
-        Titles are bolded; ``table`` blocks are emitted verbatim (their
-        ``text`` is expected to already contain a markdown table when produced
-        by a layout-aware parser such as PP-StructureV3); other blocks are
-        plain text.
-        """
-        lines: list[str] = []
-        for block in self.blocks:
-            if block.block_type == "title":
-                lines.append(f"**{block.text}**")
-            else:
-                lines.append(block.text)
-        return "\n\n".join(lines)
+        # All blocks emit plain text. We intentionally do NOT bold titles:
+        # extractable values (party names, amounts) often live in title-typed
+        # blocks, and markdown emphasis risks contaminating value extraction.
+        return "\n\n".join(block.text for block in self.blocks)
 
 
 class OCRDetailedResult(BaseModel):

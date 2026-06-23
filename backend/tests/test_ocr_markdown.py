@@ -9,13 +9,14 @@ def _block(btype: str, text: str, sort_order: int) -> OCRTextBlock:
     )
 
 
-def test_page_markdown_bolds_titles():
+def test_page_markdown_emits_plain_text():
     page = OCRPageResult(page_no=1, blocks=[
         _block("title", "第一条 总则", 1),
         _block("text", "本合同如下。", 2),
     ])
     md = page.to_markdown()
-    assert "**第一条 总则**" in md
+    assert "第一条 总则" in md
+    assert "**" not in md
     assert "本合同如下。" in md
 
 
@@ -47,7 +48,8 @@ def test_document_markdown_single_page():
     ])
     md = doc.to_markdown()
     assert md.startswith("<!-- page: 1 -->")
-    assert "**标题**" in md
+    assert "标题" in md
+    assert "**" not in md
 
 
 def test_page_marker_template_constant():
