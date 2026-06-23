@@ -18,6 +18,7 @@ import {
 import { downloadBatchExtractionResultsWorkbook } from "../lib/excelExport";
 import { fieldDetailToExtractionFieldValue } from "../types";
 import { readExtractionFieldLibrary } from "../lib/extractionFieldLibrary";
+import { reviewStatusLabel } from "../lib/reviewStatus";
 import type { ExtractionFieldValue, FieldDetail, UploadResponse } from "../types";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
@@ -1347,16 +1348,6 @@ function extractionMethodLabel(method: ExtractionFieldValue["extraction_method"]
     return "语义提取";
   }
   return "提取";
-}
-
-function reviewStatusLabel(status: string): string {
-  switch (status) {
-    case "corrected": return "已修正";
-    case "approved": return "已通过";
-    case "rejected": return "已驳回";
-    case "reviewed": return "已复核";
-    default: return "";
-  }
 }
 
 function getExtractionResultIdentity(result: ExtractionFieldValue): string {

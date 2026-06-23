@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { downloadContractFileUrl, getContractDetail, listContracts } from "../lib/api";
+import { downloadContractFileUrl, getContractDetail, listContracts, listReviewRecords, reviewField } from "../lib/api";
+import type { ReviewRecord } from "../lib/api";
+import { reviewStatusLabel } from "../lib/reviewStatus";
 import { contractBriefToExtractionRecordSummary, contractDetailToExtractionTaskResponse } from "../types";
-import type { ExtractionRecordSummary, ExtractionTaskResponse, TaskStatus } from "../types";
+import type { ExtractionFieldValue, ExtractionRecordSummary, ExtractionTaskResponse, TaskStatus } from "../types";
 
 interface ExtractionRecordsPageProps {
   onCreateExtraction: () => void;
@@ -22,6 +24,10 @@ export function ExtractionRecordsPage({ onCreateExtraction }: ExtractionRecordsP
   const [isDetailLoading, setIsDetailLoading] = useState(false);
   const [error, setError] = useState("");
   const [detailError, setDetailError] = useState("");
+  const [reviewRecords, setReviewRecords] = useState<ReviewRecord[]>([]);
+  const [editingResultId, setEditingResultId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   useEffect(() => {
     let isCurrent = true;
@@ -56,6 +62,8 @@ export function ExtractionRecordsPage({ onCreateExtraction }: ExtractionRecordsP
     setSelectedTaskId(taskId);
     setSelectedTask(null);
     setDetailError("");
+    setEditingResultId(null);
+    setHistoryOpen(false);
     setIsDetailLoading(true);
     try {
       const detail = await getContractDetail(taskId);
@@ -68,6 +76,31 @@ export function ExtractionRecordsPage({ onCreateExtraction }: ExtractionRecordsP
       setDetailError(err instanceof Error ? err.message : "提取详情加载失败。");
     } finally {
       setIsDetailLoading(false);
+    }
+    try {
+      const recs = await listReviewRecords(taskId);
+      setReviewRecords(recs);
+    } catch {
+      setReviewRecords([]);
+    }
+  }
+
+  async function saveRecordReview(contractId: string, fieldId: string) {
+    try {
+      await reviewField(contractId, fieldId, { action: "modify", new_value: editDraft });
+      setEditingResultId(null);
+      const recs = await listReviewRecords(contractId);
+      setReviewRecords(recs);
+      // Re-fetch the task detail so reviewed_value / review_status refresh.
+      const detail = await getContractDetail(contractId);
+      const taskResponse = contractDetailToExtractionTaskResponse(
+        detail,
+        records.find((r) => r.task_id === contractId)?.filename,
+      );
+      setSelectedTask(taskResponse);
+    } catch (err) {
+      console.error(err);
+      alert("复核保存失败");
     }
   }
 
@@ -159,7 +192,22 @@ export function ExtractionRecordsPage({ onCreateExtraction }: ExtractionRecordsP
               <span>{detailError}</span>
             </div>
           ) : selectedTask ? (
-            <ExtractionTaskDetail task={selectedTask} fallbackRecord={selectedRecord} />
+            <ExtractionTaskDetail
+              task={selectedTask}
+              fallbackRecord={selectedRecord}
+              reviewRecords={reviewRecords}
+              editingResultId={editingResultId}
+              editDraft={editDraft}
+              historyOpen={historyOpen}
+              onEditDraftChange={setEditDraft}
+              onStartEdit={(fieldId, draft) => {
+                setEditingResultId(fieldId);
+                setEditDraft(draft);
+              }}
+              onCancelEdit={() => setEditingResultId(null)}
+              onSaveReview={saveRecordReview}
+              onToggleHistory={() => setHistoryOpen((v) => !v)}
+            />
           ) : null}
         </aside>
       </div>
@@ -170,9 +218,27 @@ export function ExtractionRecordsPage({ onCreateExtraction }: ExtractionRecordsP
 function ExtractionTaskDetail({
   task,
   fallbackRecord,
+  reviewRecords,
+  editingResultId,
+  editDraft,
+  historyOpen,
+  onEditDraftChange,
+  onStartEdit,
+  onCancelEdit,
+  onSaveReview,
+  onToggleHistory,
 }: {
   task: ExtractionTaskResponse;
   fallbackRecord: ExtractionRecordSummary | null;
+  reviewRecords: ReviewRecord[];
+  editingResultId: string | null;
+  editDraft: string;
+  historyOpen: boolean;
+  onEditDraftChange: (value: string) => void;
+  onStartEdit: (fieldId: string, draft: string) => void;
+  onCancelEdit: () => void;
+  onSaveReview: (contractId: string, fieldId: string) => void;
+  onToggleHistory: () => void;
 }) {
   return (
     <div className="extraction-detail">
@@ -180,6 +246,9 @@ function ExtractionTaskDetail({
         <span className={`record-status ${task.status.toLowerCase()}`}>{statusLabels[task.status]}</span>
         <h2 title={task.filename}>{task.filename || fallbackRecord?.filename || "提取文件"}</h2>
         <p>{task.task_id}</p>
+        <button type="button" className="extract-value-toggle" onClick={onToggleHistory}>
+          复核历史 ({reviewRecords.length})
+        </button>
       </div>
       <div className="extraction-detail-meta">
         <span>
@@ -220,21 +289,104 @@ function ExtractionTaskDetail({
         <h3 id="extraction-detail-results">提取结果</h3>
         <div className="extraction-result-list">
           {task.results.map((result) => (
-            <article className={`extraction-result-card ${result.status}`} key={result.field_id}>
-              <header>
-                <strong>{result.field_name}</strong>
-                <span>
-                  {extractionMethodLabel(result.extraction_method)}
-                  {result.status === "found" ? ` · ${Math.round(result.confidence * 100)}%` : ` · ${statusText(result.status)}`}
-                </span>
-              </header>
-              <p>{result.status === "found" ? result.value || "-" : statusText(result.status)}</p>
-              {result.source_snippet && <small>{result.source_snippet}</small>}
-            </article>
+            <ResultCard
+              key={result.field_id}
+              result={result}
+              editing={editingResultId === result.field_id}
+              editDraft={editDraft}
+              onEditDraftChange={onEditDraftChange}
+              onStartEdit={() => onStartEdit(result.field_id, result.reviewed_value || result.value)}
+              onCancelEdit={onCancelEdit}
+              onSaveReview={() => onSaveReview(task.task_id, result.field_id)}
+            />
           ))}
         </div>
       </section>
+      {historyOpen && (
+        <section className="extraction-detail-section extraction-review-history" aria-labelledby="extraction-detail-history">
+          <h3 id="extraction-detail-history">复核历史</h3>
+          <ul className="review-history-list">
+            {reviewRecords.map((rec) => (
+              <li key={rec.id}>
+                <strong>{rec.action}</strong> · {rec.reviewer_id ?? "-"} · {formatDateTime(rec.created_at)}
+                {rec.old_value != null && <div>原值：{rec.old_value || "—"}</div>}
+                {rec.new_value != null && <div>新值：{rec.new_value || "—"}</div>}
+                {rec.comment && <div>备注：{rec.comment}</div>}
+              </li>
+            ))}
+            {reviewRecords.length === 0 && <li>暂无复核记录</li>}
+          </ul>
+        </section>
+      )}
     </div>
+  );
+}
+
+function ResultCard({
+  result,
+  editing,
+  editDraft,
+  onEditDraftChange,
+  onStartEdit,
+  onCancelEdit,
+  onSaveReview,
+}: {
+  result: ExtractionFieldValue;
+  editing: boolean;
+  editDraft: string;
+  onEditDraftChange: (value: string) => void;
+  onStartEdit: () => void;
+  onCancelEdit: () => void;
+  onSaveReview: () => void;
+}) {
+  return (
+    <article className={`extraction-result-card ${result.status}`}>
+      <header>
+        <strong>{result.field_name}</strong>
+        <span>
+          {extractionMethodLabel(result.extraction_method)}
+          {result.status === "found" ? ` · ${Math.round(result.confidence * 100)}%` : ` · ${statusText(result.status)}`}
+          {result.review_status && result.review_status !== "extracted" && (
+            <small className={`extract-review-badge ${result.review_status}`}>{reviewStatusLabel(result.review_status)}</small>
+          )}
+        </span>
+      </header>
+      {editing ? (
+        <p className="extraction-result-edit">
+          <input
+            className="field-edit-input"
+            value={editDraft}
+            onChange={(e) => onEditDraftChange(e.target.value)}
+            autoFocus
+          />
+          <button type="button" className="extract-value-toggle" onClick={onSaveReview}>
+            保存
+          </button>
+          <button type="button" className="extract-value-toggle" onClick={onCancelEdit}>
+            取消
+          </button>
+        </p>
+      ) : (
+        <p>
+          {result.reviewed_value ? (
+            <>
+              <span className="extract-card-corrected">{result.reviewed_value}</span>
+              <small className="extract-card-original">
+                原值：{result.status === "found" ? result.value || "-" : statusText(result.status)}
+              </small>
+            </>
+          ) : (
+            result.status === "found" ? result.value || "-" : statusText(result.status)
+          )}
+          {result.status === "found" && (
+            <button type="button" className="extract-value-toggle" onClick={onStartEdit}>
+              修正
+            </button>
+          )}
+        </p>
+      )}
+      {result.source_snippet && <small>{result.source_snippet}</small>}
+    </article>
   );
 }
 
