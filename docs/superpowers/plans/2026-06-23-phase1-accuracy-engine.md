@@ -871,20 +871,22 @@ def test_malformed_payload_raises():
         _provider_returning({"unexpected": True}).extract_detailed("/tmp/x.pdf", "pdf")
 
 
-def test_http_failure_retried_then_raises(monkeypatch):
+def test_http_failure_retried_then_raises():
     import pytest
     import httpx
     p = PPStructureV3Provider()
     call_count = {"n": 0}
 
-    def boom(url, payload):
+    def boom(*args, **kwargs):
         call_count["n"] += 1
         raise httpx.HTTPError("boom")
 
-    p._http_post = boom  # type: ignore[method-assign]
+    # Retry logic lives INSIDE _http_post (which calls self._client.post), so
+    # mock the client's post — not _http_post — to actually exercise the loop.
+    p._client.post = boom  # type: ignore[method-assign]
     with pytest.raises(RuntimeError):
         p.extract_detailed("/tmp/x.pdf", "pdf")
-    assert call_count["n"] >= 2  # retried
+    assert call_count["n"] >= 2  # retried (_HTTP_RETRIES + 1 attempts)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
