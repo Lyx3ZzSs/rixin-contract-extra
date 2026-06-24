@@ -293,3 +293,25 @@ async def download_contract_file(
         filename=contract_file.file_name,
         media_type=contract_file.content_type or "application/octet-stream",
     )
+
+
+@router.get("/{contract_id}/pages/{page_no}/image")
+async def get_page_image(
+    contract_id: uuid.UUID,
+    page_no: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Serve the rasterized page image (Tier 2 highlight surface)."""
+    exists = await db.execute(select(Contract.id).where(Contract.id == contract_id))
+    if exists.scalar_one_or_none() is None:
+        raise HTTPException(404, "Contract not found")
+
+    path = file_service.page_image_path(contract_id, page_no)
+    if not path.exists():
+        raise HTTPException(404, "Page image not found")
+
+    return _FileResponse(
+        path=str(path),
+        media_type="image/png",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
