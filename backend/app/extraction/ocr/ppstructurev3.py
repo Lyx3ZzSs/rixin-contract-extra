@@ -52,6 +52,17 @@ class PPStructureV3Provider(OCRProvider):
             self._client = httpx.Client(timeout=self._timeout)
         return self._client
 
+    # Block-label mapping for parsing_res_list items from layoutParsingResults.
+    # Adapted to the real PaddleX PP-StructureV3 serving output (result.layoutParsingResults[].prunedResult.parsing_res_list).
+    _LABEL_MAP = {
+        "title": "title", "doc_title": "title", "paragraph_title": "title",
+        "text": "text", "number": "text", "aside_text": "text",
+        "vision_footnote": "text", "figure_title": "text",
+        "table": "table",
+    }
+    # Block labels whose content is placeholder HTML (images/seals) — no text value, skip.
+    _SKIP_LABELS = {"figure", "seal", "header_image", "footer_image"}
+
     # ------------------------------------------------------------------
     # OCRProvider interface
     # ------------------------------------------------------------------
@@ -92,47 +103,58 @@ class PPStructureV3Provider(OCRProvider):
     # ------------------------------------------------------------------
 
     def _normalize(self, data: dict) -> OCRDetailedResult:
-        results = self._extract_payload(data)
-        if results is None:
+        pages_raw = self._extract_payload(data)
+        if not pages_raw:
             raise RuntimeError("PP-StructureV3 returned no parseable results")
 
         pages: list[OCRPageResult] = []
-        for idx, page_raw in enumerate(results):
-            page_no = int(page_raw.get("page_no", idx + 1))
+        for idx, page_raw in enumerate(pages_raw):
             blocks = self._blocks_for(page_raw)
             if not blocks:
                 continue
-            pages.append(OCRPageResult(page_no=page_no, blocks=blocks))
+            pruned = page_raw.get("prunedResult") or {}
+            pages.append(OCRPageResult(
+                page_no=idx + 1,
+                blocks=blocks,
+                width=pruned.get("width"),
+                height=pruned.get("height"),
+            ))
         return OCRDetailedResult(pages=pages, provider="ppstructurev3")
 
     @staticmethod
     def _extract_payload(data: dict) -> list[dict] | None:
-        """Return the list of page objects from a PP-StructureV3 response.
+        """Return the ``result.layoutParsingResults`` page array.
 
-        Handles common wrapper keys; adjust to match the live deployment.
+        Matches the real PaddleX PP-StructureV3 serving output; falls back to
+        top-level ``layoutParsingResults`` for deployments that omit ``result``.
         """
         if not isinstance(data, dict):
             return None
-        for key in ("results", "data", "pages"):
-            value = data.get(key)
-            if isinstance(value, list):
-                return value
-        return None
+        container = data.get("result") if isinstance(data.get("result"), dict) else data
+        pages = container.get("layoutParsingResults")
+        return pages if isinstance(pages, list) else None
 
     @staticmethod
     def _blocks_for(page_raw: dict) -> list[OCRTextBlock]:
-        regions = page_raw.get("regions") or page_raw.get("layout_regions") or []
+        """Map ``prunedResult.parsing_res_list`` blocks to OCRTextBlocks. Skips
+        image/seal blocks (placeholder HTML). Table blocks keep their HTML
+        ``block_content`` verbatim so ``to_markdown`` preserves cell structure.
+        """
+        pruned = page_raw.get("prunedResult") or {}
+        blocks_raw = pruned.get("parsing_res_list") or []
         blocks: list[OCRTextBlock] = []
-        for sort_order, region in enumerate(regions, start=1):
-            text = (region.get("text") or "").strip()
+        for sort_order, raw in enumerate(blocks_raw, start=1):
+            label = raw.get("block_label", "text")
+            if label in PPStructureV3Provider._SKIP_LABELS:
+                continue
+            text = (raw.get("block_content") or "").strip()
             if not text:
                 continue
-            bbox = PPStructureV3Provider._bbox(region.get("bbox"))
             blocks.append(OCRTextBlock(
-                block_type=region.get("type", "text"),
+                block_type=PPStructureV3Provider._LABEL_MAP.get(label, "text"),
                 text=text,
-                bbox=bbox,
-                confidence=float(region.get("confidence", 0.0)),
+                bbox=PPStructureV3Provider._bbox(raw.get("block_bbox")),
+                confidence=0.0,  # blocks carry no confidence; layout_det_res.boxes[].score does
                 sort_order=sort_order,
             ))
         return blocks
