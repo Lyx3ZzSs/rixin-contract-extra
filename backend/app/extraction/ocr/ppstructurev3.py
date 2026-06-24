@@ -72,6 +72,29 @@ class PPStructureV3Provider(OCRProvider):
         data = self._http_post(self._url, payload)
         return self._normalize(data)
 
+    def extract_from_images(self, page_images: list[bytes]) -> OCRDetailedResult:
+        """OCR each pre-rasterized page image (fileType=1) and aggregate.
+
+        Because we sent OUR images, the returned bbox lives in each image's
+        pixel space — identical to the page image we persist for display.
+        """
+        pages: list[OCRPageResult] = []
+        for idx, img_bytes in enumerate(page_images, start=1):
+            encoded = base64.b64encode(img_bytes).decode("ascii")
+            payload = {"file": encoded, "fileType": 1, "useLayout": True, "useTable": True}
+            data = self._http_post(self._url, payload)
+            pages_raw = self._extract_payload(data) or []
+            page_raw = pages_raw[0] if pages_raw else {}
+            blocks = self._blocks_for(page_raw)
+            pruned = page_raw.get("prunedResult") or {}
+            pages.append(OCRPageResult(
+                page_no=idx,
+                blocks=blocks,
+                width=pruned.get("width"),
+                height=pruned.get("height"),
+            ))
+        return OCRDetailedResult(pages=pages, provider="ppstructurev3")
+
     # ------------------------------------------------------------------
     # HTTP (mockable seam — tests override _http_post)
     # ------------------------------------------------------------------

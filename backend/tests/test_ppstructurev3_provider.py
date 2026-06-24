@@ -111,3 +111,43 @@ def test_http_failure_retried_then_raises():
     with pytest.raises(RuntimeError):
         p.extract_detailed("/tmp/x.pdf", "pdf")
     assert call_count["n"] >= 2  # retried (_HTTP_RETRIES + 1 attempts)
+
+
+def test_extract_from_images_aggregates_pages(monkeypatch):
+    """extract_from_images sends each image (fileType=1) and aggregates pages."""
+    provider = PPStructureV3Provider()
+
+    # Captured single-page PaddleX response (one text block at a known bbox).
+    one_page = {
+        "result": {"layoutParsingResults": [{"prunedResult": {
+            "width": 800, "height": 600,
+            "parsing_res_list": [
+                {"block_label": "text", "block_content": "hello", "block_bbox": [10, 20, 110, 50]},
+            ],
+        }}]},
+    }
+
+    call_args: list[dict] = []
+
+    def fake_post(_url, payload):
+        call_args.append(payload)
+        return one_page
+
+    monkeypatch.setattr(provider, "_http_post", fake_post)
+
+    result = provider.extract_from_images([b"img1", b"img2"])
+
+    assert len(result.pages) == 2
+    assert [p.page_no for p in result.pages] == [1, 2]
+    # every call sent fileType=1 (image)
+    assert all(p["fileType"] == 1 for p in call_args)
+    # page dims + bbox came back in image space
+    assert result.pages[0].width == 800 and result.pages[0].height == 600
+    assert result.pages[0].blocks[0].bbox.x1 == 10.0
+    assert result.pages[0].blocks[0].text == "hello"
+
+
+def test_extract_from_images_empty_input():
+    provider = PPStructureV3Provider()
+    result = provider.extract_from_images([])
+    assert result.pages == []
