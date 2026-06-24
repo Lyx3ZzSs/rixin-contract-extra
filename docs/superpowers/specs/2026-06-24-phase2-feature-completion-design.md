@@ -77,8 +77,8 @@ Phase 1 spec §10 原把 Phase 2 预留为「LLM 升级 + 智能能力（摘要/
        ▼  把「页面图像」（非 PDF 字节）发给 PP-StructureV3
   OCR → 返回 bbox（已在我们的图像像素空间）+ 文本 + 版面
        │
-       ├─ bbox 归一化为 [0,1]（÷ page_width/height）后落库
-       └─ 持久化 OCRBlock + OCRDetailedResult + 页面图像文件
+       ├─ bbox 保持原始像素（OCR 图像空间；与 clause_service 像素阈值兼容）
+       └─ 持久化 OCRBlock（bbox + page_width/height）+ OCRDetailedResult + 页面图像文件
 
 [抽取流水线 - 方案 2 双轨]
   OCR 完成
@@ -122,13 +122,14 @@ Phase 1 spec §10 原把 Phase 2 预留为「LLM 升级 + 智能能力（摘要/
 
 ### 4.3 页面图像持久化
 - 路径：`uploads/contracts/<contract_uuid>/pages/page_<n>.png`。
-- 合同删除时一并清理（扩展 `file_service`，沿用既有本地存储，无对象存储新依赖）。
+- 重跑 OCR 时先清理该合同旧页面图（与 `save_blocks` 删旧 OCRBlock 对齐）；合同删除端点尚不存在，`delete_contract_pages` 清理函数预置待用（扩展 `file_service`，沿用本地存储，无对象存储新依赖）。
 - 鉴权：`GET /pages/{n}/image` 沿用 API-Key（`<img src>` 场景支持 `?api_key=`，与下载端点一致）+ `Cache-Control`。
 
-### 4.4 bbox 归一化落库
-- OCR 回流时把 bbox 存为 **[0,1] 归一化**（`bbox.x1/page_width` 等），与存储分辨率解耦。
-- bbox 列仍为 JSON（`OCRBlock`/`ExtractedField`/`ContractClause`），**零 schema 迁移**，仅存值变换。
-- 归一化使未来调 DPI / 换显示尺寸都不破坏坐标；且与 Tier 2 的 `<img>` 显示天然匹配。
+### 4.4 bbox 存储策略：保持原始像素（不归一化）
+- OCR 回流后 bbox **保持原始像素值**（OCR 图像空间），**不做 [0,1] 归一化**。
+- 原因：① Tier 2 的零误差来自"显示同一张 OCR 图像"，bbox（图像像素）与 `<img>`（同图）天然同空间，按 `bbox × 显示宽/page_width` 精确叠加即可，**无需归一化**；② `clause_service._VERTICAL_GAP_THRESHOLD=50.0` 是像素空间阈值，归一化会破坏条款拆分。
+- bbox 列、page_width/height 列、存值**全部不变**（与现状一致），**零 schema 迁移、零存值变换**。
+- 前端叠加：`rect.left = bbox.x1 × (displayWidth / page_width)`（page_width 来自 OCRBlock，与 bbox 同源于 OCR 图像）。
 
 ### 4.5 存储与成本缓解
 - DPI 200、A4 ≈ 1654×2339，PNG ≈ 1–3MB/页；30 页 ≈ 30–90MB。
@@ -167,9 +168,9 @@ Phase 1 spec §10 原把 Phase 2 预留为「LLM 升级 + 智能能力（摘要/
 - 分类命不到任何专属字段 → 回退全通用（graceful）。
 
 ### 5.3 无变化项（明确）
-- ❌ 不动 `ExtractedField` / `ContractClause` / `OCRBlock` schema（字段已齐；bbox 列不变，仅存归一化值）。
+- ❌ 不动 `ExtractedField` / `ContractClause` / `OCRBlock` schema（字段已齐；bbox 列与存值均不变，保持原始像素）。
 - ❌ 不动 worker / 队列 / 租约 / 重试。
-- ❌ 不动 OCR/LLM provider 抽象（仅改 provider 输入与 bbox 归一化）。
+- ❌ 不动 OCR/LLM provider 抽象基类（仅新增 provider 的"图像输入"方法）。
 
 ---
 
@@ -179,7 +180,7 @@ Phase 1 spec §10 原把 Phase 2 预留为「LLM 升级 + 智能能力（摘要/
 
 | 改动 | 说明 |
 |---|---|
-| `FieldDetail` 补 `bbox`（归一化） | 高亮必需。`page_no` 已返回，bbox 列已在模型，仅 schema 暴露 |
+| `FieldDetail` 补 `bbox`（原始像素） | 高亮必需。`page_no` 已返回，bbox 列已在模型，仅 schema 暴露 |
 | `ContractDetail` 嵌入 `violations` + `clauses` + `page_dimensions` | 单次拉取拿全：违规列表、条款列表、每页宽高（高亮缩放参考，源自 OCRBlock） |
 | 新 schema `RuleViolationDetail` | 映射 `rule_violations` 表 |
 | 新端点 `PATCH /api/v1/contracts/{id}/violations/{vid}` | 「忽略/取消忽略」→ 改 status + ignored_at/by + 写 ReviewRecord |
@@ -195,7 +196,7 @@ Phase 1 spec §10 原把 Phase 2 预留为「LLM 升级 + 智能能力（摘要/
 
 ### 7.1 原文高亮（Tier 2：`<img>` 预览 + 归一化 bbox 叠加）
 - 预览从 **pdfjs 改为 `<img>`**：`<img src="/api/v1/contracts/{id}/pages/{n}/image">`，叠加 `position:absolute` 覆盖层。
-- 高亮框 = `归一化bbox × 图像显示尺寸`。bbox 与图像同空间 → **零误差，无需坐标映射或宽高比闸门**。
+- 高亮框 = `bbox × (显示宽 / page_width)`（page_width 来自 OCRBlock，与 bbox 同源于 OCR 图像）。bbox 与显示图像同空间 → **零误差，无需坐标映射或宽高比闸门**。
 - 移除 pdfjs 渲染复杂度（worker、canvas 逐页、缩放适配全免），`ExtractionPage` 反而更轻；可移除 `pdfjs-dist` 依赖。
 - 交互：点字段/条款 → 切到 `page_no` 的 `<img>` → 覆盖层画归一化框 → 滚入视区 + 短暂脉冲。多选可叠多个框。
 - 补充：提供「下载原始 PDF」链接（既有 `/files/download`），弥补图像预览无矢量文本。
@@ -280,7 +281,7 @@ await asyncio.gather(track_a(db_main), track_b(db_own))
 5. 「忽略违规」→ 置灰 + 留痕；修正字段值 → 受影响规则自动重算。
 6. 条款扁平列表可见 + 可条款级复核。
 7. 评测集字段 F1 不退化（含 OCR 图像输入）；后端 pytest 全绿含新增覆盖。
-8. Tier 2：页面图端点可用、bbox 零误差对齐、合同删除清理页面图。
+8. Tier 2：页面图端点可用、bbox 零误差对齐、重跑 OCR 时清理旧页面图（合同删除端点尚不存在，清理函数预置待用）。
 
 ### 9.4 风险与缓解
 
@@ -302,8 +303,8 @@ await asyncio.gather(track_a(db_main), track_b(db_own))
 - `app/config.py` — 接线 `ocr_pdf_dpi`、加 `enable_rule_validation`/`enable_clause_split`、页面图存储路径
 - `app/extraction/ocr/ppstructurev3.py` — 改为接收/发送页面图像、bbox 归一化
 - `app/extraction/ocr/ppocr.py` — 同上（PDF 本地光栅化 + 图像输入）
-- `app/extraction/base.py` — bbox 归一化类型约定
-- `app/services/ocr_service.py` — 光栅化编排、页面图持久化、bbox 归一化落库
+- `app/extraction/base.py` — 新增 `PageImage`/`extract_from_images` 相关类型（bbox 保持原始像素，不变）
+- `app/services/ocr_service.py` — 光栅化编排、页面图持久化、调用 `extract_from_images`（bbox 存值不变）
 - `app/services/file_service.py` — 页面图保存/删除
 - `app/services/pipeline.py` — 双轨编排（classify 门控 + gather）
 - `app/services/extraction_service.py` — `load_field_definitions(type)`、`extract_and_save` 入参
@@ -342,7 +343,7 @@ await asyncio.gather(track_a(db_main), track_b(db_own))
 | P2-D4 | classify 驱动字段集（加 contract_type 列） | 让分类真正有用而非标签；命不到回退全通用，graceful |
 | P2-D5 | 条款做最小版（扁平列表+复核），不做层级树 | parent_id 仅存储，UI 树后置 Phase 3，YAGNI |
 | P2-D6 | 原文高亮选 Tier 2（本地光栅化+图像端点+归一化） | 构造性零误差；前端去 pdfjs 反简化；成熟业界范式（Textract/Document AI） |
-| P2-D7 | bbox 归一化落库（[0,1]） | 与存储分辨率/显示尺寸解耦，零迁移且未来可调 |
+| P2-D7 | bbox 保持原始像素、不归一化 | Tier 2 零误差来自"显示同一张 OCR 图像"，无需归一化；且避免破坏 clause_service 的像素空间阈值（_VERTICAL_GAP_THRESHOLD=50.0） |
 | P2-D8 | ContractDetail 嵌入 violations/clauses/page_dimensions | 单次加载拿全，减少前端往返，YAGNI 不建独立 GET |
 | P2-D9 | 加 kill-switch enable_rule_validation/enable_clause_split | 灰度回滚便利 |
 | P2-D10 | 前端仅 vitest 最小安全网（可选） | 主线是接线非工程化；仅覆盖最易错的归一化缩放纯函数 |
