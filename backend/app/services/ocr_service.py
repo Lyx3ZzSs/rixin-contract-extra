@@ -75,11 +75,15 @@ class OCRService:
         provider = get_ocr_provider()
 
         # 1. Prepare + persist page images (rasterize PDF, or use image as-is).
-        page_images = cls._prepare_page_images(file_path, file_type)
+        #    Offloaded to a thread — rasterization (PyMuPDF get_pixmap per page)
+        #    and filesystem writes are blocking and must not stall the event loop.
+        page_images = await asyncio.to_thread(cls._prepare_page_images, file_path, file_type)
         if page_images:
-            file_service.delete_contract_pages(contract_id)
-            for img in page_images:
-                file_service.save_page_image(contract_id, img.page_no, img.png_bytes)
+            def _persist():
+                file_service.delete_contract_pages(contract_id)
+                for img in page_images:
+                    file_service.save_page_image(contract_id, img.page_no, img.png_bytes)
+            await asyncio.to_thread(_persist)
 
         # 2. OCR — prefer image input (bbox in our pixel space); fall back to
         #    legacy PDF-bytes path when disabled or unsupported.
@@ -117,6 +121,9 @@ class OCRService:
         if file_type.lower() == "pdf":
             return rasterize_pdf_to_pages(file_path, dpi=settings.ppocr_pdf_dpi)
         # Image upload: the file itself is the (single) page image.
+        # NOTE: bytes are served as image/png regardless of true encoding — this
+        # assumes PNG input. Current contract uploads are PDFs, so this branch is
+        # rarely hit in practice.
         return [PageImage(page_no=1, png_bytes=Path(file_path).read_bytes())]
 
     @classmethod
