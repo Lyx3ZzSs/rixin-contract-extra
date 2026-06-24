@@ -89,6 +89,15 @@ class OCRDetailedResult(BaseModel):
         return "\n\n".join(parts)
 
 
+class PageImage(BaseModel):
+    """A rasterized page image (Tier 2). Lives in a known pixel space so the
+    bbox returned by OCR maps exactly to the page image we persist + serve."""
+    page_no: int
+    png_bytes: bytes
+    width: int | None = None
+    height: int | None = None
+
+
 class FieldSpec(BaseModel):
     """Unified field specification — single input type for LLM prompt construction.
 

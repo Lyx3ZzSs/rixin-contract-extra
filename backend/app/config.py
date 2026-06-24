@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     ppocr_pdf_dpi: int = 200
     ppocr_page_concurrency: int = 3
 
+    # Tier 2 traceability: rasterize PDFs locally so bbox lives in the same
+    # pixel space as the page image we serve for highlight overlay. When False,
+    # fall back to the legacy PDF-bytes path (provider.extract_detailed).
+    ocr_rasterize_locally: bool = True
+
     # LLM (Qwen3-30B-A3B, OpenAI-compatible)
     llm_api_url: str = "http://10.10.10.245:8000/v1/chat/completions"
     llm_api_key: str = ""
