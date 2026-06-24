@@ -4,6 +4,10 @@
     <content url="file://$MODULE_DIR$">
       <sourceFolder url="file://$MODULE_DIR$/backend" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/backend/app/uploads" />
+      <excludeFolder url="file://$MODULE_DIR$/backend/rixin_contract_extract.egg-info" />
+      <excludeFolder url="file://$MODULE_DIR$/docker-workspace" />
+      <excludeFolder url="file://$MODULE_DIR$/frontend/.vite" />
     </content>
     <orderEntry type="jdk" jdkName="Python 3.12 (rixin-contract-extract)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
