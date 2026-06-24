@@ -17,13 +17,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from pathlib import Path
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.extraction.base import BBox, OCRDetailedResult, OCRPageResult, OCRTextBlock
+from app.config import settings
+from app.extraction.base import BBox, OCRDetailedResult, OCRPageResult, OCRTextBlock, PageImage
 from app.extraction.ocr import get_ocr_provider
+from app.extraction.ocr.rasterize import rasterize_pdf_to_pages
 from app.models.ocr import OCRBlock
+from app.services import file_service
 
 logger = logging.getLogger(__name__)
 
@@ -63,24 +67,57 @@ class OCRService:
         file_path: str,
         file_type: str,
     ) -> OCRDetailedResult:
-        """Run OCR and persist the block-level results.
+        """Run OCR and persist block-level results + page images.
 
-        Returns the ``OCRDetailedResult`` from the provider so callers
-        (the pipeline) can continue using it without an extra DB read.
+        Tier 2: rasterize locally so bbox lives in the same pixel space as the
+        page images we serve for highlight overlay.
         """
-        # 1. Call provider
         provider = get_ocr_provider()
-        result = await asyncio.to_thread(provider.extract_detailed, file_path, file_type)
+
+        # 1. Prepare + persist page images (rasterize PDF, or use image as-is).
+        page_images = cls._prepare_page_images(file_path, file_type)
+        if page_images:
+            file_service.delete_contract_pages(contract_id)
+            for img in page_images:
+                file_service.save_page_image(contract_id, img.page_no, img.png_bytes)
+
+        # 2. OCR — prefer image input (bbox in our pixel space); fall back to
+        #    legacy PDF-bytes path when disabled or unsupported.
+        if settings.ocr_rasterize_locally and page_images:
+            try:
+                result = await asyncio.to_thread(
+                    provider.extract_from_images, [img.png_bytes for img in page_images],
+                )
+            except NotImplementedError:
+                result = await asyncio.to_thread(provider.extract_detailed, file_path, file_type)
+        else:
+            result = await asyncio.to_thread(provider.extract_detailed, file_path, file_type)
+
         if not result.full_text.strip():
             raise ValueError("OCR result is empty")
 
-        # 2. Persist blocks
+        # 3. Persist blocks.
         records = await cls.save_blocks(db, contract_id, result)
         if not records:
             raise ValueError("OCR result contains no text blocks")
 
         cls._log_ocr_diagnostics(contract_id, result, len(records))
         return result
+
+    @classmethod
+    def _prepare_page_images(cls, file_path: str, file_type: str) -> list[PageImage]:
+        """Return page images for OCR + display.
+
+        PDFs are rasterized locally (known pixel space); image files are used
+        directly as a single page. Returns [] only when rasterization is off
+        AND the file is a PDF (legacy path will be used instead).
+        """
+        if not settings.ocr_rasterize_locally:
+            return []
+        if file_type.lower() == "pdf":
+            return rasterize_pdf_to_pages(file_path, dpi=settings.ppocr_pdf_dpi)
+        # Image upload: the file itself is the (single) page image.
+        return [PageImage(page_no=1, png_bytes=Path(file_path).read_bytes())]
 
     @classmethod
     def _log_ocr_diagnostics(

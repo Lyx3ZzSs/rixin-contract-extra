@@ -171,21 +171,49 @@ def test_ocr_log_truncate_helper_limits_text():
 
 
 @pytest.mark.asyncio
+async def test_ocr_service_persists_page_images(sample_pdf_content, tmp_upload_dir):
+    """process() must rasterize the PDF and persist one page image per page."""
+    from tests.conftest import test_session_factory
+    from app.services.file_service import save_file, page_image_path
+    from app.services.contract_service import create_contract
+    from app.models.contract import ContractFile
+
+    file_path, file_type, _size, content_hash = save_file(sample_pdf_content, "pages.pdf")
+    async with test_session_factory() as db:
+        contract = await create_contract(db, content_hash=content_hash)
+        db.add(ContractFile(contract_id=contract.id, file_name="pages.pdf", file_path=file_path,
+                            file_type=file_type, file_size=len(sample_pdf_content),
+                            content_type="application/pdf"))
+        await db.flush()
+        await OCRService.process(db, contract.id, file_path, file_type)
+        await db.commit()
+        contract_id = contract.id
+
+    # at least page 1 must be persisted as an image
+    assert page_image_path(contract_id, 1).exists()
+
+
+@pytest.mark.asyncio
 async def test_ocr_service_rejects_empty_results(monkeypatch):
-    """OCRService.process should fail when a provider returns no text."""
+    """process() must fail when the provider returns no text (new image path)."""
     from app.services import ocr_service
+    from app.extraction.base import OCRDetailedResult, OCRPageResult, PageImage
 
     class EmptyProvider:
-        def extract_detailed(self, _file_path: str, _file_type: str) -> OCRDetailedResult:
-            return OCRDetailedResult(
-                pages=[OCRPageResult(page_no=1, blocks=[])],
-                provider="empty",
-            )
+        def extract_from_images(self, _imgs):
+            return OCRDetailedResult(pages=[OCRPageResult(page_no=1, blocks=[])], provider="empty")
 
     monkeypatch.setattr(ocr_service, "get_ocr_provider", lambda: EmptyProvider())
+    # skip real rasterization — feed a dummy page image
+    monkeypatch.setattr(
+        ocr_service.OCRService, "_prepare_page_images",
+        classmethod(lambda cls, fp, ft: [PageImage(page_no=1, png_bytes=b"x", width=1, height=1)]),
+    )
 
     with pytest.raises(ValueError, match="OCR result is empty"):
-        await OCRService.process(None, "00000000-0000-0000-0000-000000000000", "/tmp/empty.pdf", "pdf")
+        await ocr_service.OCRService.process(
+            None, "00000000-0000-0000-0000-000000000000", "/tmp/empty.pdf", "pdf",
+        )
 
 
 def test_paddle_provider_is_not_available(monkeypatch):
