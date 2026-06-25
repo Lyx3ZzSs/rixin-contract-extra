@@ -13,6 +13,7 @@ import {
   getTask,
   prepareContract,
   reviewField,
+  reviewViolation,
   startContractExtraction,
 } from "../lib/api";
 import {
@@ -29,6 +30,7 @@ import type {
   ExtractionFieldValue,
   FieldDetail,
   UploadResponse,
+  Violation,
 } from "../types";
 import { PageImagePreview, type HighlightTarget } from "../components/PageImagePreview";
 
@@ -45,6 +47,33 @@ const DOCUMENT_MAX_SIZE = 60 * 1024 * 1024;
 const ALLOWED_EXTRACT_EXTENSIONS = new Set(["pdf", "png", "jpg", "jpeg", "bmp"]);
 const prepareContractCache = new WeakMap<File, Promise<UploadResponse>>();
 const LOW_CONFIDENCE_THRESHOLD = 0.7;
+
+// --- Violation helpers (Phase 2 / Task 4) ---
+// Group violations by their target field_key (field-level violations). Null
+// field_key means the rule spans the whole contract (e.g. payment ratio sum)
+// and is surfaced in the contract-level summary instead of a field card.
+function violationsByField(violations: Violation[] | undefined | null): Map<string, Violation[]> {
+  const map = new Map<string, Violation[]>();
+  if (!violations) return map;
+  for (const v of violations) {
+    if (v.field_key == null) continue;
+    const list = map.get(v.field_key);
+    if (list) list.push(v);
+    else map.set(v.field_key, [v]);
+  }
+  return map;
+}
+
+function contractViolations(violations: Violation[] | undefined | null): Violation[] {
+  if (!violations) return [];
+  return violations.filter((v) => v.field_key == null);
+}
+
+// Only "active" violations are worth displaying; "ignored" ones are kept around
+// so an already-ignored badge can be greyed out rather than vanishing mid-session.
+function isActiveViolation(v: Violation, ignoredIds: Set<string>): boolean {
+  return v.status === "active" && !ignoredIds.has(v.id);
+}
 
 type BatchStatus = "pending" | "processing" | "completed" | "failed" | "skipped";
 
@@ -225,6 +254,13 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
   const [reviewSavingKey, setReviewSavingKey] = useState<string | null>(null);
   const [selectedReviewKeys, setSelectedReviewKeys] = useState<Set<string>>(new Set());
   const [batchBusy, setBatchBusy] = useState(false);
+  // Violation UI state (Task 4). ignoredViolationIds holds ids dismissed via the
+  // 忽略 action this session so the badge greys out immediately without waiting
+  // for a contract-detail refetch; expandedViolationFieldKeys toggles the inline
+  // message+忽略 panel per field card.
+  const [ignoredViolationIds, setIgnoredViolationIds] = useState<Set<string>>(new Set());
+  const [expandedViolationFieldKeys, setExpandedViolationFieldKeys] = useState<Set<string>>(new Set());
+  const [ignoringViolationId, setIgnoringViolationId] = useState<string | null>(null);
 
   const updateItem = useCallback((itemId: string, patch: Partial<BatchFileItem>) => {
     setItems((currentItems) =>
@@ -369,6 +405,26 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
       alert("批量复核失败，请重试");
     } finally {
       setBatchBusy(false);
+    }
+  }
+
+  // Task 4: dismiss a rule violation. PATCH approve → server marks it ignored;
+  // we then add the id to ignoredViolationIds so the badge greys out and the
+  // red inset bar disappears on the next render without a full refetch.
+  async function ignoreViolation(contractId: string, violationId: string) {
+    setIgnoringViolationId(violationId);
+    try {
+      await reviewViolation(contractId, violationId, { action: "approve" });
+      setIgnoredViolationIds((prev) => {
+        const next = new Set(prev);
+        next.add(violationId);
+        return next;
+      });
+    } catch (err) {
+      console.error("ignore violation failed", err);
+      alert("忽略违规失败，请重试");
+    } finally {
+      setIgnoringViolationId(null);
     }
   }
 
@@ -760,6 +816,18 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
     }
     return map;
   }, [activeContractDetail]);
+  // Task 4: violation lookups. Recomputed when the contract detail or the
+  // session-local ignored set changes (ignore mutates the latter, not the detail).
+  const violationsByFieldMap = useMemo(
+    () => violationsByField(activeContractDetail?.violations),
+    [activeContractDetail],
+  );
+  const contractLevelViolations = useMemo(
+    () => contractViolations(activeContractDetail?.violations),
+    [activeContractDetail],
+  );
+  const activeContractType = activeContractDetail?.contract_type ?? null;
+  const activeContractTypeConfidence = activeContractDetail?.contract_type_confidence ?? null;
   const hasBatchResults = items.some((item) =>
     item.extractionStatus === "completed" || item.extractionStatus === "failed" || item.extractionStatus === "skipped",
   );
@@ -878,7 +946,23 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
                 <div className="extract-card-header">
                   <div>
                     <h2>提取字段信息</h2>
-                    <p>{activeItem?.file.name ?? "合同文件"}</p>
+                    <p>
+                      {activeItem?.file.name ?? "合同文件"}
+                      {activeContractType && (
+                        <small
+                          className={`extract-classify-badge${activeContractTypeConfidence != null && activeContractTypeConfidence < LOW_CONFIDENCE_THRESHOLD ? " low-confidence" : ""}`}
+                          title={
+                            activeContractTypeConfidence != null
+                              ? `类型置信度 ${Math.round(activeContractTypeConfidence * 100)}%`
+                              : undefined
+                          }
+                        >
+                          {activeContractType}
+                          {activeContractTypeConfidence != null && ` ${Math.round(activeContractTypeConfidence * 100)}%`}
+                          {activeContractTypeConfidence != null && activeContractTypeConfidence < LOW_CONFIDENCE_THRESHOLD && " · 类型待确认"}
+                        </small>
+                      )}
+                    </p>
                   </div>
                   <button type="button" className="extract-back-link" onClick={returnToFieldSetup}>
                     返回字段设置
@@ -928,6 +1012,45 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
                       </button>
                     </div>
                   )}
+                  {contractLevelViolations.length > 0 && (() => {
+                    const activeContractId = activeItem?.upload?.contract_id;
+                    return (
+                    <div className="extract-violation-summary" role="status">
+                      <div className="extract-violation-summary-head">
+                        <strong>合同级规则校验</strong>
+                        <span className="extract-violation-summary-count">
+                          {contractLevelViolations.filter((v) => isActiveViolation(v, ignoredViolationIds)).length} 项待处理
+                        </span>
+                      </div>
+                      <ul>
+                        {contractLevelViolations.map((v) => {
+                          const ignored = !isActiveViolation(v, ignoredViolationIds);
+                          return (
+                            <li
+                              key={v.id}
+                              className={`extract-violation-summary-item severity-${v.severity}${ignored ? " ignored" : ""}`}
+                            >
+                              <span className={`extract-violation-badge ${v.severity}`}>
+                                {v.severity === "error" ? "错误" : v.severity === "warning" ? "警告" : "提示"}
+                              </span>
+                              <span className="extract-violation-message">{v.message}</span>
+                              {!ignored && activeContractId && (
+                                <button
+                                  type="button"
+                                  className="extract-value-toggle extract-violation-ignore"
+                                  disabled={ignoringViolationId === v.id}
+                                  onClick={() => ignoreViolation(activeContractId, v.id)}
+                                >
+                                  {ignoringViolationId === v.id ? "处理中" : "忽略"}
+                                </button>
+                              )}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                    );
+                  })()}
                   <div className="extract-card-list">
                     {results.map((r) => {
                       const valueText =
@@ -944,6 +1067,15 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
                       const isReviewingThis = reviewingFieldKey === r.field_key;
                       const canHighlight =
                         !isReviewingThis && !batchBusy && r.page_no != null && cardBBox != null;
+                      // Task 4: field-level violations for this card. Active ones drive the
+                      // red inset bar + severity badge; already-ignored ones are still shown
+                      // (greyed) so the reviewer sees what was dismissed.
+                      const fieldViolations = violationsByFieldMap.get(r.field_key) ?? [];
+                      const activeFieldViolations = fieldViolations.filter((v) =>
+                        isActiveViolation(v, ignoredViolationIds),
+                      );
+                      const hasActiveViolation = activeFieldViolations.length > 0;
+                      const fieldViolationExpanded = expandedViolationFieldKeys.has(r.field_key);
                       const handleCardHighlight = (e?: ReactMouseEvent | ReactKeyboardEvent) => {
                         if (!canHighlight || r.page_no == null || !cardBBox) return;
                         // Ignore clicks that originate from interactive children (checkbox,
@@ -956,7 +1088,7 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
                       };
                       return (
                         <div
-                          className={`extract-card-item result${isLowConfidence ? " low-confidence" : ""}${canHighlight ? " clickable" : ""}`}
+                          className={`extract-card-item result${isLowConfidence ? " low-confidence" : ""}${hasActiveViolation ? " has-violation" : ""}${canHighlight ? " clickable" : ""}`}
                           key={resultKey}
                           onClick={canHighlight ? handleCardHighlight : undefined}
                           onKeyDown={
@@ -996,6 +1128,29 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
                                 {reviewStatusLabel(r.review_status)}
                               </small>
                             )}
+                            {fieldViolations.length > 0 && (() => {
+                              const topSeverity = activeFieldViolations[0]?.severity ?? fieldViolations[0].severity;
+                              return (
+                                <button
+                                  type="button"
+                                  className={`extract-violation-badge ${topSeverity}${hasActiveViolation ? "" : " ignored"}`}
+                                  aria-expanded={fieldViolationExpanded}
+                                  aria-label={`规则校验：${fieldViolations.length} 项`}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setExpandedViolationFieldKeys((prev) => {
+                                      const next = new Set(prev);
+                                      if (next.has(r.field_key)) next.delete(r.field_key);
+                                      else next.add(r.field_key);
+                                      return next;
+                                    });
+                                  }}
+                                >
+                                  {topSeverity === "error" ? "错误" : topSeverity === "warning" ? "警告" : "提示"}
+                                  <span className="extract-violation-badge-count">{fieldViolations.length}</span>
+                                </button>
+                              );
+                            })()}
                           </span>
                           {reviewingFieldKey === r.field_key ? (
                             <span className="extract-card-value editing">
@@ -1070,6 +1225,40 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
                                 ` · 来源：${r.source_text.slice(0, 40)}${r.source_text.length > 40 ? "…" : ""}`}
                             </small>
                           )}
+                          {fieldViolationExpanded && fieldViolations.length > 0 && (() => {
+                            const activeContractId = activeItem?.upload?.contract_id;
+                            return (
+                              <div className="extract-violation-panel">
+                                {fieldViolations.map((v) => {
+                                  const ignored = !isActiveViolation(v, ignoredViolationIds);
+                                  return (
+                                    <div
+                                      key={v.id}
+                                      className={`extract-violation-row severity-${v.severity}${ignored ? " ignored" : ""}`}
+                                    >
+                                      <span className={`extract-violation-badge ${v.severity}${ignored ? " ignored" : ""}`}>
+                                        {v.severity === "error" ? "错误" : v.severity === "warning" ? "警告" : "提示"}
+                                      </span>
+                                      <span className="extract-violation-message">{v.message}</span>
+                                      {!ignored && activeContractId && (
+                                        <button
+                                          type="button"
+                                          className="extract-value-toggle extract-violation-ignore"
+                                          disabled={ignoringViolationId === v.id}
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            ignoreViolation(activeContractId, v.id);
+                                          }}
+                                        >
+                                          {ignoringViolationId === v.id ? "处理中" : "忽略"}
+                                        </button>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            );
+                          })()}
                         </div>
                       );
                     })}
