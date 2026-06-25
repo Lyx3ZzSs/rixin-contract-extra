@@ -12,6 +12,7 @@ import {
   getContractDetail,
   getTask,
   prepareContract,
+  reviewClause,
   reviewField,
   reviewViolation,
   startContractExtraction,
@@ -261,6 +262,12 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
   const [ignoredViolationIds, setIgnoredViolationIds] = useState<Set<string>>(new Set());
   const [expandedViolationFieldKeys, setExpandedViolationFieldKeys] = useState<Set<string>>(new Set());
   const [ignoringViolationId, setIgnoringViolationId] = useState<string | null>(null);
+  // Task 5: clause list state. clauseReviewStates holds per-clause review_status for
+  // optimistic badge updates after approve/reject without a full contract refetch.
+  // expandedClauseIds toggles the content truncation per clause item.
+  const [clauseReviewStates, setClauseReviewStates] = useState<Record<string, string>>({});
+  const [expandedClauseIds, setExpandedClauseIds] = useState<Set<string>>(new Set());
+  const [reviewingClauseId, setReviewingClauseId] = useState<string | null>(null);
 
   const updateItem = useCallback((itemId: string, patch: Partial<BatchFileItem>) => {
     setItems((currentItems) =>
@@ -425,6 +432,21 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
       alert("忽略违规失败，请重试");
     } finally {
       setIgnoringViolationId(null);
+    }
+  }
+
+  // Task 5: approve or reject a single clause. Updates the local clauseReviewStates
+  // map so the badge reflects the new status immediately without a full refetch.
+  async function handleClauseReview(contractId: string, clauseId: string, action: "approve" | "reject") {
+    setReviewingClauseId(clauseId);
+    try {
+      const updated = await reviewClause(contractId, clauseId, { action });
+      setClauseReviewStates((prev) => ({ ...prev, [clauseId]: updated.review_status }));
+    } catch (err) {
+      console.error("clause review failed", err);
+      alert("条款复核失败，请重试");
+    } finally {
+      setReviewingClauseId(null);
     }
   }
 
@@ -1263,6 +1285,112 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
                       );
                     })}
                   </div>
+                  {/* Task 5: flat clause list with review actions + click-to-highlight */}
+                  {activeContractDetail?.clauses && activeContractDetail.clauses.length > 0 && (
+                    <div className="extract-clause-list">
+                      <h3 className="extract-clause-list-title">
+                        条款列表
+                        <span className="extract-clause-count">{activeContractDetail.clauses.length} 条</span>
+                      </h3>
+                      {activeContractDetail.clauses.map((clause) => {
+                        const title = clause.clause_title ?? clause.clause_type ?? "条款";
+                        const reviewStatus = clauseReviewStates[clause.id] ?? clause.review_status;
+                        const isExpanded = expandedClauseIds.has(clause.id);
+                        const canHighlight = clause.page_no != null && clause.bbox != null;
+                        const isReviewing = reviewingClauseId === clause.id;
+                        const contractId = activeItem?.upload?.contract_id;
+                        const hasLongContent = clause.content.length > 72 || clause.content.includes("\n");
+
+                        const handleClauseHighlight = (e?: ReactMouseEvent | ReactKeyboardEvent) => {
+                          if (!canHighlight || clause.page_no == null || !clause.bbox) return;
+                          if (e && "target" in e) {
+                            const t = e.target as HTMLElement;
+                            if (t.closest("button, input, a, [role=button]")) return;
+                          }
+                          setHighlightTarget({ pageNo: clause.page_no, bbox: clause.bbox });
+                        };
+
+                        return (
+                          <div
+                            className={`extract-clause-item${canHighlight ? " clickable" : ""}`}
+                            key={clause.id}
+                            onClick={canHighlight ? handleClauseHighlight : undefined}
+                            onKeyDown={
+                              canHighlight
+                                ? (e) => {
+                                    if (e.key === "Enter" || e.key === " ") {
+                                      e.preventDefault();
+                                      handleClauseHighlight(e);
+                                    }
+                                  }
+                                : undefined
+                            }
+                            role={canHighlight ? "button" : undefined}
+                            tabIndex={canHighlight ? 0 : undefined}
+                            aria-label={
+                              canHighlight ? `高亮第 ${clause.page_no} 页条款原文位置` : undefined
+                            }
+                          >
+                            <div className="extract-clause-item-head">
+                              <strong className="extract-clause-title">{title}</strong>
+                              {clause.page_no != null && (
+                                <small className="extract-clause-page">第 {clause.page_no} 页</small>
+                              )}
+                              {reviewStatus && reviewStatus !== "extracted" && (
+                                <small className={`extract-review-badge ${reviewStatus}`}>
+                                  {reviewStatusLabel(reviewStatus)}
+                                </small>
+                              )}
+                            </div>
+                            <div
+                              className={`extract-clause-content${isExpanded ? " expanded" : ""}`}
+                            >
+                              {clause.content}
+                            </div>
+                            <div className="extract-clause-item-foot">
+                              {hasLongContent && (
+                                <button
+                                  type="button"
+                                  className="extract-value-toggle"
+                                  aria-expanded={isExpanded}
+                                  onClick={() => {
+                                    setExpandedClauseIds((prev) => {
+                                      const next = new Set(prev);
+                                      if (next.has(clause.id)) next.delete(clause.id);
+                                      else next.add(clause.id);
+                                      return next;
+                                    });
+                                  }}
+                                >
+                                  {isExpanded ? "收起" : "展开"}
+                                </button>
+                              )}
+                              {contractId && (
+                                <div className="extract-clause-actions">
+                                  <button
+                                    type="button"
+                                    className="extract-value-toggle"
+                                    disabled={isReviewing || reviewStatus === "approved"}
+                                    onClick={() => handleClauseReview(contractId, clause.id, "approve")}
+                                  >
+                                    {isReviewing ? "处理中" : "通过"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="extract-value-toggle"
+                                    disabled={isReviewing || reviewStatus === "rejected"}
+                                    onClick={() => handleClauseReview(contractId, clause.id, "reject")}
+                                  >
+                                    {isReviewing ? "处理中" : "驳回"}
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                   </>
                 ) : showPendingFieldRows ? (
                   <div className="extract-card-list">

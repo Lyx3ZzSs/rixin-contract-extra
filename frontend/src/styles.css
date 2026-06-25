@@ -1712,6 +1712,116 @@ h2 {
   flex-wrap: wrap;
 }
 
+/* ── Task 5: clause list (flat, with review + highlight) ── */
+
+.extract-clause-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+  padding-top: 14px;
+  border-top: 1px solid #edf2f2;
+}
+
+.extract-clause-list-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  color: #1f2b2e;
+  font-size: 0.95rem;
+  font-weight: 900;
+}
+
+.extract-clause-count {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.extract-clause-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.extract-clause-item:hover {
+  border-color: var(--teal);
+  box-shadow: 0 2px 8px rgba(32, 66, 70, 0.05);
+}
+
+.extract-clause-item.clickable {
+  cursor: pointer;
+}
+
+.extract-clause-item.clickable:focus-visible {
+  outline: 2px solid var(--teal-strong);
+  outline-offset: 2px;
+}
+
+.extract-clause-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.extract-clause-title {
+  color: #1f2b2e;
+  font-size: 0.9rem;
+  font-weight: 800;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.extract-clause-page {
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 700;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.extract-clause-content {
+  color: #3a4648;
+  font-size: 0.84rem;
+  line-height: 1.55;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  word-break: break-word;
+}
+
+.extract-clause-content.expanded {
+  display: block;
+  overflow: visible;
+  -webkit-line-clamp: unset;
+}
+
+.extract-clause-item-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.extract-clause-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
 .extract-card-value {
   display: grid;
   flex: 1 1 auto;
