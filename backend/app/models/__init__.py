@@ -8,6 +8,7 @@ from app.models.contract import (
 from app.models.ocr import OCRBlock
 from app.models.review import ReviewRecord
 from app.models.task import ContractTask
+from app.models.rule_violation import RuleViolation
 
 __all__ = [
     "Contract",
@@ -18,4 +19,5 @@ __all__ = [
     "ContractTask",
     "ReviewRecord",
     "FieldDefinitionModel",
+    "RuleViolation",
 ]
