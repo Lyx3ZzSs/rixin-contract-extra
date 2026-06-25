@@ -22,9 +22,9 @@ class RuleViolation(Base):
     )
     field_key: Mapped[str | None] = mapped_column(String(100), nullable=True)
     rule_key: Mapped[str] = mapped_column(String(100), nullable=False)
-    severity: Mapped[str] = mapped_column(String(20), nullable=False, default="warning")
+    severity: Mapped[str] = mapped_column(String(20), nullable=False, server_default="warning")
     message: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="active")
     detail: Mapped[dict | None] = mapped_column(JSONType)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False,

@@ -4,17 +4,10 @@ import uuid
 import pytest
 from sqlalchemy import select
 
-from app.extraction.base import ExtractedField, RuleViolation as RVData, ValidationResult
+from app.extraction.base import RuleViolation as RVData, ValidationResult
 from app.models.rule_violation import RuleViolation
 from app.models.field_definition import FieldDefinition
 from app.services import violation_service
-
-
-def _fields_with_empty_party_a() -> list[ExtractedField]:
-    return [
-        ExtractedField(field_key="party-a-name", field_name="甲方", value=None, confidence=0.9),
-        ExtractedField(field_key="party-b-name", field_name="乙方", value="某公司", confidence=0.9),
-    ]
 
 
 @pytest.mark.asyncio
@@ -72,3 +65,48 @@ async def test_load_field_definitions_filters_by_contract_type():
         lease_fields = await load_field_definitions(db, contract_type="lease")
         keys = {f.field_key for f in lease_fields}
     assert keys == {"common-1", "lease-1"}  # 通用 + 该类型专属，不含 service
+
+
+@pytest.mark.asyncio
+async def test_recompute_violations_uses_reviewed_value():
+    """recompute_violations honours the EFFECTIVE value (reviewed_value wins
+    over value). A field whose raw value would pass but whose reviewed_value
+    is whitespace-only must surface a required_fields violation; and the
+    inverse (raw empty, reviewed filled) must NOT.
+    """
+    from tests.conftest import test_session_factory
+    from app.models.contract import Contract, ExtractedField as EFRow
+    from app.services.contract_service import create_contract
+
+    async with test_session_factory() as db:
+        contract = await create_contract(db, content_hash="recompute-eff-1")
+        contract_id = contract.id
+        # party-a-name: raw value present (passes), but reviewer set it to
+        # whitespace -> effective value empty -> required_fields violation.
+        db.add(EFRow(
+            contract_id=contract_id, field_key="party-a-name", field_name="甲方",
+            value="某公司", reviewed_value="   ", confidence=0.9,
+        ))
+        # party-b-name: raw empty (would fail), but reviewer filled it ->
+        # effective value present -> no violation.
+        db.add(EFRow(
+            contract_id=contract_id, field_key="party-b-name", field_name="乙方",
+            value=None, reviewed_value="乙公司", confidence=0.9,
+        ))
+        await db.commit()
+
+    async with test_session_factory() as db:
+        n = await violation_service.recompute_violations(db, contract_id)
+        await db.commit()
+
+    async with test_session_factory() as db:
+        rows = (await db.execute(
+            select(RuleViolation).where(RuleViolation.contract_id == contract_id)
+        )).scalars().all()
+
+    # Exactly one required_fields violation, on party-a-name (the reviewed-away
+    # one). party-b-name must NOT appear because reviewed_value rescued it.
+    rv = [r for r in rows if r.rule_key == "required_fields"]
+    assert len(rv) == 1
+    assert rv[0].field_key == "party-a-name"
+    assert n >= 1

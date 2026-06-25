@@ -34,8 +34,11 @@ async def test_extraction_pipeline_writes_clauses_and_violations(monkeypatch):
     monkeypatch.setattr(LLMService, "classify_contract_type", fake_classify)
 
     async def fake_extract(_full_text, field_definitions=None):
+        # Inline contract_type intentionally DIFFERS from classify's ("service"):
+        # the final contract_type must be "service" (classify authoritative),
+        # NOT this inline "lease" — this is what the assertion below guards.
         # party-a-name empty -> triggers required_fields violation (Track A)
-        return ExtractionResult(contract_type="service", fields=[
+        return ExtractionResult(contract_type="lease", fields=[
             ExtractedField(field_key="party-a-name", field_name="甲方", value=None, confidence=0.9),
             ExtractedField(field_key="party-b-name", field_name="乙方", value="某公司", confidence=0.9),
         ])

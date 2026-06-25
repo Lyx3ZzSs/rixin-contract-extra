@@ -258,12 +258,10 @@ async def _run_extraction_pipeline_inner(
                     for f in db_fields
                 ]
 
-            ocr_result_ref = ocr_result  # captured for Track B
-
             async def _track_a() -> None:
                 # Track A uses the outer ``db`` (main writer: extraction + type).
                 extraction = await extract_and_save(
-                    db, contract_id, ocr_result_ref.to_markdown(),
+                    db, contract_id, ocr_result.to_markdown(),
                     field_definitions=field_specs,
                 )
                 await _raise_if_cancelled(db, task_id)
@@ -299,7 +297,7 @@ async def _run_extraction_pipeline_inner(
                 from app.services.clause_service import split_and_save_clauses
                 try:
                     async with session_factory() as db2:
-                        await split_and_save_clauses(db2, contract_id, ocr_result_ref)
+                        await split_and_save_clauses(db2, contract_id, ocr_result)
                         await db2.commit()
                 except Exception:
                     logger.warning(
