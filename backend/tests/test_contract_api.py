@@ -207,3 +207,35 @@ async def test_get_nonexistent_contract(client):
     fake_id = "00000000-0000-0000-0000-000000000000"
     response = await client.get(f"/api/v1/contracts/{fake_id}")
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_page_image_returns_png(client, sample_pdf_content, tmp_upload_dir):
+    """GET /contracts/{id}/pages/{n}/image returns the persisted page PNG."""
+    from app.services import file_service
+
+    resp = await _prepare(client, "pages.pdf", sample_pdf_content)
+    assert resp.status_code == 201
+    cid = resp.json()["data"]["contract_id"]
+
+    file_service.save_page_image(uuid.UUID(cid), 1, b"\x89PNG\r\n\x1a\nfake-bytes")
+
+    resp = await client.get(f"/api/v1/contracts/{cid}/pages/1/image")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/png"
+    assert resp.headers["cache-control"].startswith("private")
+
+
+@pytest.mark.asyncio
+async def test_get_page_image_not_found(client, sample_pdf_content, tmp_upload_dir):
+    """Contract exists but page image absent → 404; unknown contract → 404."""
+    resp = await _prepare(client, "pages.pdf", sample_pdf_content)
+    cid = resp.json()["data"]["contract_id"]
+
+    # contract exists, no page image persisted
+    missing = await client.get(f"/api/v1/contracts/{cid}/pages/1/image")
+    assert missing.status_code == 404
+
+    # unknown contract
+    unknown = await client.get(f"/api/v1/contracts/{uuid.uuid4()}/pages/1/image")
+    assert unknown.status_code == 404

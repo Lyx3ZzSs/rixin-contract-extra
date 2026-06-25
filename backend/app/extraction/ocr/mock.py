@@ -127,3 +127,11 @@ class MockOCRProvider(OCRProvider):
 
     def extract_detailed(self, file_path: str, file_type: str) -> OCRDetailedResult:
         return MOCK_DETAILED_RESULT.model_copy(deep=True)
+
+    def extract_from_images(self, page_images: list[bytes]) -> OCRDetailedResult:
+        # Tier 2 image-input path — return the same canned result so OCRService
+        # tests exercise the new flow without a live provider. One page per
+        # image keeps page numbering faithful when callers pass N images.
+        if not page_images:
+            return OCRDetailedResult(pages=[], provider="mock")
+        return MOCK_DETAILED_RESULT.model_copy(deep=True)
