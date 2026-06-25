@@ -47,10 +47,10 @@ export interface ExtractionRecordSummary {
 
 
 export interface BBox {
-  x0: number;
-  y0: number;
   x1: number;
   y1: number;
+  x2: number;
+  y2: number;
 }
 
 // ────────────────────────────────────────────────────────────
@@ -106,6 +106,8 @@ export interface FieldDetail {
   source_paragraph_id?: number | null;
   source_block_start?: number | null;
   source_block_end?: number | null;
+  bbox?: BBox | null;
+  page_end?: number | null;
   extract_method?: string;
   review_status: string;
   reviewed_value: string | null;
@@ -122,7 +124,22 @@ export interface ClauseDetail {
   confidence: number | null;
   level?: number;
   parent_id?: string | null;
+  bbox?: BBox | null;
+  page_end?: number | null;
   review_status: string;
+}
+
+export interface Violation {
+  id: string;
+  field_key: string | null;
+  rule_key: string;
+  severity: "error" | "warning" | "info" | string;
+  message: string;
+  status: "active" | "ignored" | string;
+  detail?: Record<string, unknown> | null;
+  created_at: string;
+  ignored_at?: string | null;
+  ignored_by?: string | null;
 }
 
 export interface ContractDetail {
@@ -130,6 +147,9 @@ export interface ContractDetail {
   title: string | null;
   status: string;
   page_count: number | null;
+  contract_type?: string | null;
+  contract_type_confidence?: number | null;
+  violations?: Violation[];
   files: FileBrief[];
   fields: FieldDetail[];
   clauses: ClauseDetail[];

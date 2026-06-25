@@ -1524,6 +1524,15 @@ h2 {
   box-shadow: 0 2px 8px rgba(32, 66, 70, 0.05);
 }
 
+/* T2 traceability: cards with a resolvable bbox act as highlight triggers. */
+.extract-card-item.clickable {
+  cursor: pointer;
+}
+.extract-card-item.clickable:focus-visible {
+  outline: 2px solid var(--accent, #2d6a6f);
+  outline-offset: 2px;
+}
+
 .extract-card-name {
   flex: 0 0 112px;
   min-width: 0;
@@ -1561,6 +1570,125 @@ h2 {
 .extract-card-corrected { font-weight: 600; }
 .extract-card-original { display: block; font-size: 11px; color: #888; }
 .extract-card-item.result.low-confidence { box-shadow: inset 3px 0 var(--amber); }
+
+/* --- Task 4: rule-violation UI + classify badge --- */
+/* Field card with at least one active violation: red inset bar mirrors the
+   amber low-confidence bar above. Ignored violations drop the bar. */
+.extract-card-item.result.has-violation { box-shadow: inset 3px 0 var(--red); }
+
+/* Severity badge — mirrors .extract-review-badge shape (pill), error→red,
+   warning→amber. Ignored variant greys out so the reviewer sees what was dismissed. */
+.extract-violation-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 3px;
+  margin-left: 6px;
+  padding: 1px 8px;
+  border: none;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+  background: var(--teal-soft);
+  color: var(--teal-strong);
+}
+.extract-violation-badge.error { background: var(--red); color: #fff; }
+.extract-violation-badge.warning { background: var(--amber); color: #fff; }
+.extract-violation-badge.info { background: var(--teal-soft); color: var(--teal-strong); }
+.extract-violation-badge.ignored,
+.extract-violation-badge.ignored.error,
+.extract-violation-badge.ignored.warning {
+  background: #ecefed;
+  color: #9aa3a3;
+  cursor: default;
+}
+.extract-violation-badge-count {
+  display: inline-block;
+  min-width: 14px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.35);
+  font-size: 10px;
+  text-align: center;
+}
+.extract-violation-badge.ignored .extract-violation-badge-count { background: rgba(0, 0, 0, 0.08); }
+
+/* Inline expandable panel inside a field card listing each violation + 忽略. */
+.extract-violation-panel {
+  width: 100%;
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.extract-violation-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.extract-violation-row .extract-violation-badge {
+  margin: 0;
+  flex: 0 0 auto;
+  cursor: default;
+}
+.extract-violation-row.ignored .extract-violation-message { color: #9aa3a3; text-decoration: line-through; }
+.extract-violation-message { flex: 1 1 auto; min-width: 0; word-break: break-word; color: #3a4648; }
+.extract-violation-ignore { flex: 0 0 auto; padding: 1px 8px; font-size: 11px; }
+
+/* Contract-level (field_key==null) summary panel, sits above the field card list. */
+.extract-violation-summary {
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--red);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+.extract-violation-summary-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.extract-violation-summary-head strong { font-size: 0.9rem; color: #1f2b2e; }
+.extract-violation-summary-count { font-size: 11px; color: #728082; }
+.extract-violation-summary ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.extract-violation-summary-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.extract-violation-summary-item .extract-violation-badge { margin: 0; flex: 0 0 auto; cursor: default; }
+.extract-violation-summary-item.ignored .extract-violation-message { color: #9aa3a3; text-decoration: line-through; }
+
+/* Classify badge in the result header: contract_type + confidence. Teal by
+   default, amber hint when confidence is below the low-confidence threshold. */
+.extract-classify-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--teal-soft);
+  color: var(--teal-strong);
+  vertical-align: middle;
+}
+.extract-classify-badge.low-confidence {
+  background: #fdf0e3;
+  color: var(--amber);
+}
 .extract-card-meta {
   display: block;
   width: 100%;
@@ -1582,6 +1710,116 @@ h2 {
   gap: 8px;
   margin: 6px 0;
   flex-wrap: wrap;
+}
+
+/* ── Task 5: clause list (flat, with review + highlight) ── */
+
+.extract-clause-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+  padding-top: 14px;
+  border-top: 1px solid #edf2f2;
+}
+
+.extract-clause-list-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  color: #1f2b2e;
+  font-size: 0.95rem;
+  font-weight: 900;
+}
+
+.extract-clause-count {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.extract-clause-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.extract-clause-item:hover {
+  border-color: var(--teal);
+  box-shadow: 0 2px 8px rgba(32, 66, 70, 0.05);
+}
+
+.extract-clause-item.clickable {
+  cursor: pointer;
+}
+
+.extract-clause-item.clickable:focus-visible {
+  outline: 2px solid var(--teal-strong);
+  outline-offset: 2px;
+}
+
+.extract-clause-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.extract-clause-title {
+  color: #1f2b2e;
+  font-size: 0.9rem;
+  font-weight: 800;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.extract-clause-page {
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 700;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.extract-clause-content {
+  color: #3a4648;
+  font-size: 0.84rem;
+  line-height: 1.55;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  word-break: break-word;
+}
+
+.extract-clause-content.expanded {
+  display: block;
+  overflow: visible;
+  -webkit-line-clamp: unset;
+}
+
+.extract-clause-item-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.extract-clause-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
 }
 
 .extract-card-value {
@@ -4884,3 +5122,58 @@ h2 {
 .extract-export-menu-items button:hover {
   background: var(--teal-soft);
 }
+
+/* ────────────────────────────────────────────────────────────
+   PageImagePreview — Tier 2 OCR traceability (Phase 2 Plan 3)
+   ──────────────────────────────────────────────────────────── */
+.pip-scroll {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.pip-page-frame {
+  position: relative;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.pip-page-frame img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 6px;
+  box-shadow: var(--shadow);
+  background: #ffffff;
+}
+
+.pip-highlight {
+  position: absolute;
+  border: 2px solid var(--red);
+  background: rgba(201, 54, 44, 0.18);
+  border-radius: 2px;
+  pointer-events: none;
+  animation: pip-pulse 1.2s ease-out 2;
+}
+
+@keyframes pip-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(201, 54, 44, 0);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(201, 54, 44, 0.25);
+  }
+}
+
+/* ── Task 3: ErrorBoundary fallback ── */
+
+.error-boundary-fallback { display: flex; align-items: center; justify-content: center; min-height: 300px; padding: 24px; text-align: center; }
+.error-boundary-content { max-width: 480px; }
+.error-boundary-content h2 { font-size: 18px; color: var(--text); margin: 0 0 8px; }
+.error-boundary-content p { color: var(--muted); margin: 0 0 16px; }
+.error-boundary-refresh { padding: 8px 16px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); cursor: pointer; }
+.error-boundary-refresh:hover { border-color: var(--teal); }

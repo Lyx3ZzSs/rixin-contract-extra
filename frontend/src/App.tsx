@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { LoginPage } from "./pages/LoginPage";
 import { ExtractionFieldsPage } from "./pages/ExtractionFieldsPage";
 import { ExtractionPage } from "./pages/ExtractionPage";
@@ -59,6 +60,7 @@ export function App() {
   }
 
   return (
+    <ErrorBoundary>
     <div className={isSidebarExpanded ? "oa-frame sidebar-expanded" : "oa-frame"}>
       <aside className="oa-sidebar" aria-label="主导航">
         <strong className="oa-sidebar-title">{isSidebarExpanded ? "合同智能提取" : "提取"}</strong>
@@ -135,5 +137,6 @@ export function App() {
         <main className="app-shell">{content}</main>
       </div>
     </div>
+    </ErrorBoundary>
   );
 }

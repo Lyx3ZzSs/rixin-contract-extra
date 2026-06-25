@@ -1,5 +1,6 @@
 import type {
   ApiResponse,
+  ClauseDetail,
   ContractBrief,
   ContractDetail,
   ContractList,
@@ -7,6 +8,7 @@ import type {
   FieldDetail,
   TaskDetail,
   UploadResponse,
+  Violation,
 } from "../types";
 
 
@@ -170,6 +172,17 @@ export function downloadContractFileUrl(contractId: string): string {
 }
 
 // ────────────────────────────────────────────────────────────
+// Page image URL builder (Tier 2 OCR traceability — Phase 2 Plan 1)
+// ────────────────────────────────────────────────────────────
+
+export function getPageImageUrl(contractId: string, pageNo: number): string {
+  let url = toApiUrl(`/api/v1/contracts/${contractId}/pages/${pageNo}/image`);
+  const key = getApiKey();
+  if (key) url += `?api_key=${encodeURIComponent(key)}`;
+  return url;
+}
+
+// ────────────────────────────────────────────────────────────
 // Legacy compat wrappers (used by existing page components)
 // ────────────────────────────────────────────────────────────
 
@@ -282,6 +295,54 @@ export async function reviewField(
     body: JSON.stringify(body),
   });
   return parseJsonResponse<FieldDetail>(response);
+}
+
+export interface ClauseReviewRequest {
+  action: "modify" | "approve" | "reject";
+  new_value?: string;
+  comment?: string;
+}
+
+export async function reviewClause(
+  contractId: string,
+  clauseId: string,
+  body: ClauseReviewRequest,
+): Promise<ClauseDetail> {
+  const response = await fetch(
+    toApiUrl(`/api/v1/contracts/${contractId}/clauses/${clauseId}/review`),
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ ...body, reviewer_id: "web" }),
+    },
+  );
+  return parseJsonResponse<ClauseDetail>(response);
+}
+
+export interface ViolationReviewRequest {
+  action: "modify" | "approve" | "reject";
+  new_value?: string;
+  comment?: string;
+}
+
+export async function reviewViolation(
+  contractId: string,
+  violationId: string,
+  body: ViolationReviewRequest,
+): Promise<Violation> {
+  const response = await fetch(
+    toApiUrl(`/api/v1/contracts/${contractId}/violations/${violationId}?reviewer_id=${encodeURIComponent("web")}`),
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({
+        action: body.action,
+        new_value: body.new_value,
+        comment: body.comment,
+      }),
+    },
+  );
+  return parseJsonResponse<Violation>(response);
 }
 
 export async function batchReviewFields(

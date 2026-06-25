@@ -1,4 +1,4 @@
-import { forwardRef, type ChangeEvent, type UIEvent, useCallback, useEffect, useRef, useState } from "react";
+import { forwardRef, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type UIEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from "lucide-react";
 import * as pdfjsLib from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
@@ -12,7 +12,9 @@ import {
   getContractDetail,
   getTask,
   prepareContract,
+  reviewClause,
   reviewField,
+  reviewViolation,
   startContractExtraction,
 } from "../lib/api";
 import {
@@ -23,7 +25,15 @@ import {
 import { fieldDetailToExtractionFieldValue } from "../types";
 import { readExtractionFieldLibrary } from "../lib/extractionFieldLibrary";
 import { reviewStatusLabel } from "../lib/reviewStatus";
-import type { ExtractionFieldValue, FieldDetail, UploadResponse } from "../types";
+import type {
+  BBox,
+  ContractDetail,
+  ExtractionFieldValue,
+  FieldDetail,
+  UploadResponse,
+  Violation,
+} from "../types";
+import { PageImagePreview, type HighlightTarget } from "../components/PageImagePreview";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -39,6 +49,33 @@ const ALLOWED_EXTRACT_EXTENSIONS = new Set(["pdf", "png", "jpg", "jpeg", "bmp"])
 const prepareContractCache = new WeakMap<File, Promise<UploadResponse>>();
 const LOW_CONFIDENCE_THRESHOLD = 0.7;
 
+// --- Violation helpers (Phase 2 / Task 4) ---
+// Group violations by their target field_key (field-level violations). Null
+// field_key means the rule spans the whole contract (e.g. payment ratio sum)
+// and is surfaced in the contract-level summary instead of a field card.
+function violationsByField(violations: Violation[] | undefined | null): Map<string, Violation[]> {
+  const map = new Map<string, Violation[]>();
+  if (!violations) return map;
+  for (const v of violations) {
+    if (v.field_key == null) continue;
+    const list = map.get(v.field_key);
+    if (list) list.push(v);
+    else map.set(v.field_key, [v]);
+  }
+  return map;
+}
+
+function contractViolations(violations: Violation[] | undefined | null): Violation[] {
+  if (!violations) return [];
+  return violations.filter((v) => v.field_key == null);
+}
+
+// Only "active" violations are worth displaying; "ignored" ones are kept around
+// so an already-ignored badge can be greyed out rather than vanishing mid-session.
+function isActiveViolation(v: Violation, ignoredIds: Set<string>): boolean {
+  return v.status === "active" && !ignoredIds.has(v.id);
+}
+
 type BatchStatus = "pending" | "processing" | "completed" | "failed" | "skipped";
 
 interface BatchFileItem {
@@ -51,6 +88,10 @@ interface BatchFileItem {
   extractionStatus: BatchStatus;
   extractionStage: string;
   results: ExtractionFieldValue[] | null;
+  /** Latest ContractDetail for this contract (page_count + per-field bbox). Threaded
+   *  from getContractDetail at extraction-completion and batch-review-refresh so the
+   *  result-view preview + field-click highlight have a bbox/page source. */
+  contractDetail?: ContractDetail | null;
   error: string;
 }
 
@@ -198,6 +239,8 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
   const [isExtracting, setIsExtracting] = useState(false);
   const [extractionError, setExtractionError] = useState("");
   const [expandedResultKeys, setExpandedResultKeys] = useState<Set<string>>(() => new Set());
+  // T2 traceability: target page+bbox driven by field-card clicks; consumed by PageImagePreview.
+  const [highlightTarget, setHighlightTarget] = useState<HighlightTarget | null>(null);
   const [currentStep, setCurrentStep] = useState<1 | 2 | 3>(2);
   const batchRunIdRef = useRef(0);
   const ocrSyncPromiseByItemRef = useRef(new Map<string, Promise<void>>());
@@ -212,6 +255,19 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
   const [reviewSavingKey, setReviewSavingKey] = useState<string | null>(null);
   const [selectedReviewKeys, setSelectedReviewKeys] = useState<Set<string>>(new Set());
   const [batchBusy, setBatchBusy] = useState(false);
+  // Violation UI state (Task 4). ignoredViolationIds holds ids dismissed via the
+  // 忽略 action this session so the badge greys out immediately without waiting
+  // for a contract-detail refetch; expandedViolationFieldKeys toggles the inline
+  // message+忽略 panel per field card.
+  const [ignoredViolationIds, setIgnoredViolationIds] = useState<Set<string>>(new Set());
+  const [expandedViolationFieldKeys, setExpandedViolationFieldKeys] = useState<Set<string>>(new Set());
+  const [ignoringViolationId, setIgnoringViolationId] = useState<string | null>(null);
+  // Task 5: clause list state. clauseReviewStates holds per-clause review_status for
+  // optimistic badge updates after approve/reject without a full contract refetch.
+  // expandedClauseIds toggles the content truncation per clause item.
+  const [clauseReviewStates, setClauseReviewStates] = useState<Record<string, string>>({});
+  const [expandedClauseIds, setExpandedClauseIds] = useState<Set<string>>(new Set());
+  const [reviewingClauseId, setReviewingClauseId] = useState<string | null>(null);
 
   const updateItem = useCallback((itemId: string, patch: Partial<BatchFileItem>) => {
     setItems((currentItems) =>
@@ -349,13 +405,48 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
       );
       const detail = await getContractDetail(activeItem.upload.contract_id);
       const nextResults = buildFieldValues(fields, detail.fields);
-      updateItem(activeItem.id, { results: nextResults });
+      updateItem(activeItem.id, { results: nextResults, contractDetail: detail });
       setSelectedReviewKeys(new Set());
     } catch (err) {
       console.error("batch review failed", err);
       alert("批量复核失败，请重试");
     } finally {
       setBatchBusy(false);
+    }
+  }
+
+  // Task 4: dismiss a rule violation. PATCH approve → server marks it ignored;
+  // we then add the id to ignoredViolationIds so the badge greys out and the
+  // red inset bar disappears on the next render without a full refetch.
+  async function ignoreViolation(contractId: string, violationId: string) {
+    setIgnoringViolationId(violationId);
+    try {
+      await reviewViolation(contractId, violationId, { action: "approve" });
+      setIgnoredViolationIds((prev) => {
+        const next = new Set(prev);
+        next.add(violationId);
+        return next;
+      });
+    } catch (err) {
+      console.error("ignore violation failed", err);
+      alert("忽略违规失败，请重试");
+    } finally {
+      setIgnoringViolationId(null);
+    }
+  }
+
+  // Task 5: approve or reject a single clause. Updates the local clauseReviewStates
+  // map so the badge reflects the new status immediately without a full refetch.
+  async function handleClauseReview(contractId: string, clauseId: string, action: "approve" | "reject") {
+    setReviewingClauseId(clauseId);
+    try {
+      const updated = await reviewClause(contractId, clauseId, { action });
+      setClauseReviewStates((prev) => ({ ...prev, [clauseId]: updated.review_status }));
+    } catch (err) {
+      console.error("clause review failed", err);
+      alert("条款复核失败，请重试");
+    } finally {
+      setReviewingClauseId(null);
     }
   }
 
@@ -546,6 +637,7 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
         extractionStatus: "completed",
         extractionStage: "completed",
         results: buildFieldValues(selectedFields, detail.fields),
+        contractDetail: detail,
         error: "",
       });
     } catch (err) {
@@ -733,6 +825,31 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
 
   const activeFieldCount = fields.length;
   const results = activeItem?.results ?? null;
+  // ContractDetail for the active item — source of page_count + per-field bbox for the
+  // T2 image preview and field-click highlight. Threaded from getContractDetail at
+  // extraction-completion / batch-review-refresh (see extractSingleBatchItem / runBatchReview).
+  const activeContractDetail = activeItem?.contractDetail ?? null;
+  // Map field_id → bbox so a clicked result card (which carries field_id but no bbox) can
+  // resolve its highlight target in O(1) without re-scanning the detail on every click.
+  const fieldBBoxById = useMemo(() => {
+    const map = new Map<string, BBox>();
+    for (const f of activeContractDetail?.fields ?? []) {
+      if (f.bbox) map.set(f.id, f.bbox);
+    }
+    return map;
+  }, [activeContractDetail]);
+  // Task 4: violation lookups. Recomputed when the contract detail or the
+  // session-local ignored set changes (ignore mutates the latter, not the detail).
+  const violationsByFieldMap = useMemo(
+    () => violationsByField(activeContractDetail?.violations),
+    [activeContractDetail],
+  );
+  const contractLevelViolations = useMemo(
+    () => contractViolations(activeContractDetail?.violations),
+    [activeContractDetail],
+  );
+  const activeContractType = activeContractDetail?.contract_type ?? null;
+  const activeContractTypeConfidence = activeContractDetail?.contract_type_confidence ?? null;
   const hasBatchResults = items.some((item) =>
     item.extractionStatus === "completed" || item.extractionStatus === "failed" || item.extractionStatus === "skipped",
   );
@@ -826,7 +943,18 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
             <div className="extract-document-page">
               {!activeItem || !activeFile ? (
                 <DocumentFallback file={initialItems[0].file} message="请选择合同文件" />
+              ) : activeItem.upload?.contract_id ? (
+                // T2 OCR traceability preview: per-page OCR images + bbox highlight.
+                // Primary preview once the contract exists (server rasterizes PDFs to
+                // page images). pageCount defaults to 1 until ContractDetail lands.
+                <PageImagePreview
+                  contractId={activeItem.upload.contract_id}
+                  pageCount={activeContractDetail?.page_count ?? 1}
+                  target={highlightTarget}
+                />
               ) : isPdf ? (
+                // Pre-contract fallback: PDF uploaded but not yet processed/rasterized —
+                // render directly via pdfjs until a contract_id is available.
                 <FlatPdfPreview src={activeItem.documentUrl} file={activeFile} />
               ) : (
                 <DocumentFallback file={activeFile} />
@@ -840,7 +968,23 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
                 <div className="extract-card-header">
                   <div>
                     <h2>提取字段信息</h2>
-                    <p>{activeItem?.file.name ?? "合同文件"}</p>
+                    <p>
+                      {activeItem?.file.name ?? "合同文件"}
+                      {activeContractType && (
+                        <small
+                          className={`extract-classify-badge${activeContractTypeConfidence != null && activeContractTypeConfidence < LOW_CONFIDENCE_THRESHOLD ? " low-confidence" : ""}`}
+                          title={
+                            activeContractTypeConfidence != null
+                              ? `类型置信度 ${Math.round(activeContractTypeConfidence * 100)}%`
+                              : undefined
+                          }
+                        >
+                          {activeContractType}
+                          {activeContractTypeConfidence != null && ` ${Math.round(activeContractTypeConfidence * 100)}%`}
+                          {activeContractTypeConfidence != null && activeContractTypeConfidence < LOW_CONFIDENCE_THRESHOLD && " · 类型待确认"}
+                        </small>
+                      )}
+                    </p>
                   </div>
                   <button type="button" className="extract-back-link" onClick={returnToFieldSetup}>
                     返回字段设置
@@ -890,6 +1034,45 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
                       </button>
                     </div>
                   )}
+                  {contractLevelViolations.length > 0 && (() => {
+                    const activeContractId = activeItem?.upload?.contract_id;
+                    return (
+                    <div className="extract-violation-summary" role="status">
+                      <div className="extract-violation-summary-head">
+                        <strong>合同级规则校验</strong>
+                        <span className="extract-violation-summary-count">
+                          {contractLevelViolations.filter((v) => isActiveViolation(v, ignoredViolationIds)).length} 项待处理
+                        </span>
+                      </div>
+                      <ul>
+                        {contractLevelViolations.map((v) => {
+                          const ignored = !isActiveViolation(v, ignoredViolationIds);
+                          return (
+                            <li
+                              key={v.id}
+                              className={`extract-violation-summary-item severity-${v.severity}${ignored ? " ignored" : ""}`}
+                            >
+                              <span className={`extract-violation-badge ${v.severity}`}>
+                                {v.severity === "error" ? "错误" : v.severity === "warning" ? "警告" : "提示"}
+                              </span>
+                              <span className="extract-violation-message">{v.message}</span>
+                              {!ignored && activeContractId && (
+                                <button
+                                  type="button"
+                                  className="extract-value-toggle extract-violation-ignore"
+                                  disabled={ignoringViolationId === v.id}
+                                  onClick={() => ignoreViolation(activeContractId, v.id)}
+                                >
+                                  {ignoringViolationId === v.id ? "处理中" : "忽略"}
+                                </button>
+                              )}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                    );
+                  })()}
                   <div className="extract-card-list">
                     {results.map((r) => {
                       const valueText =
@@ -899,10 +1082,52 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
                       const canExpand = r.status === "found" && isLongExtractionValue(valueText);
                       const isLowConfidence =
                         r.confidence != null && r.confidence < LOW_CONFIDENCE_THRESHOLD;
+                      // T2 highlight: resolve bbox from the active ContractDetail (the UI
+                      // ExtractionFieldValue carries no bbox). Clickable only when we have
+                      // both a page_no and a bbox, and the card isn't in review-edit mode.
+                      const cardBBox = r.field_id ? fieldBBoxById.get(r.field_id) ?? null : null;
+                      const isReviewingThis = reviewingFieldKey === r.field_key;
+                      const canHighlight =
+                        !isReviewingThis && !batchBusy && r.page_no != null && cardBBox != null;
+                      // Task 4: field-level violations for this card. Active ones drive the
+                      // red inset bar + severity badge; already-ignored ones are still shown
+                      // (greyed) so the reviewer sees what was dismissed.
+                      const fieldViolations = violationsByFieldMap.get(r.field_key) ?? [];
+                      const activeFieldViolations = fieldViolations.filter((v) =>
+                        isActiveViolation(v, ignoredViolationIds),
+                      );
+                      const hasActiveViolation = activeFieldViolations.length > 0;
+                      const fieldViolationExpanded = expandedViolationFieldKeys.has(r.field_key);
+                      const handleCardHighlight = (e?: ReactMouseEvent | ReactKeyboardEvent) => {
+                        if (!canHighlight || r.page_no == null || !cardBBox) return;
+                        // Ignore clicks that originate from interactive children (checkbox,
+                        // 修正/展开/保存 buttons) so those keep their own behavior.
+                        if (e && "target" in e) {
+                          const t = e.target as HTMLElement;
+                          if (t.closest("button, input, a, [role=button]")) return;
+                        }
+                        setHighlightTarget({ pageNo: r.page_no, bbox: cardBBox });
+                      };
                       return (
                         <div
-                          className={`extract-card-item result${isLowConfidence ? " low-confidence" : ""}`}
+                          className={`extract-card-item result${isLowConfidence ? " low-confidence" : ""}${hasActiveViolation ? " has-violation" : ""}${canHighlight ? " clickable" : ""}`}
                           key={resultKey}
+                          onClick={canHighlight ? handleCardHighlight : undefined}
+                          onKeyDown={
+                            canHighlight
+                              ? (e) => {
+                                  if (e.key === "Enter" || e.key === " ") {
+                                    e.preventDefault();
+                                    handleCardHighlight(e);
+                                  }
+                                }
+                              : undefined
+                          }
+                          role={canHighlight ? "button" : undefined}
+                          tabIndex={canHighlight ? 0 : undefined}
+                          aria-label={
+                            canHighlight ? `高亮第 ${r.page_no} 页原文位置` : undefined
+                          }
                         >
                           <span className="extract-card-name">
                             <input
@@ -925,6 +1150,33 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
                                 {reviewStatusLabel(r.review_status)}
                               </small>
                             )}
+                            {fieldViolations.length > 0 && (() => {
+                              const topSeverity = activeFieldViolations.length > 0
+                                ? (activeFieldViolations.some(v => v.severity === 'error') ? 'error'
+                                  : activeFieldViolations.some(v => v.severity === 'warning') ? 'warning'
+                                  : activeFieldViolations[0].severity)
+                                : (fieldViolations[0]?.severity ?? 'info');
+                              return (
+                                <button
+                                  type="button"
+                                  className={`extract-violation-badge ${topSeverity}${hasActiveViolation ? "" : " ignored"}`}
+                                  aria-expanded={fieldViolationExpanded}
+                                  aria-label={`规则校验：${fieldViolations.length} 项`}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setExpandedViolationFieldKeys((prev) => {
+                                      const next = new Set(prev);
+                                      if (next.has(r.field_key)) next.delete(r.field_key);
+                                      else next.add(r.field_key);
+                                      return next;
+                                    });
+                                  }}
+                                >
+                                  {topSeverity === "error" ? "错误" : topSeverity === "warning" ? "警告" : "提示"}
+                                  <span className="extract-violation-badge-count">{fieldViolations.length}</span>
+                                </button>
+                              );
+                            })()}
                           </span>
                           {reviewingFieldKey === r.field_key ? (
                             <span className="extract-card-value editing">
@@ -999,10 +1251,150 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
                                 ` · 来源：${r.source_text.slice(0, 40)}${r.source_text.length > 40 ? "…" : ""}`}
                             </small>
                           )}
+                          {fieldViolationExpanded && fieldViolations.length > 0 && (() => {
+                            const activeContractId = activeItem?.upload?.contract_id;
+                            return (
+                              <div className="extract-violation-panel">
+                                {fieldViolations.map((v) => {
+                                  const ignored = !isActiveViolation(v, ignoredViolationIds);
+                                  return (
+                                    <div
+                                      key={v.id}
+                                      className={`extract-violation-row severity-${v.severity}${ignored ? " ignored" : ""}`}
+                                    >
+                                      <span className={`extract-violation-badge ${v.severity}${ignored ? " ignored" : ""}`}>
+                                        {v.severity === "error" ? "错误" : v.severity === "warning" ? "警告" : "提示"}
+                                      </span>
+                                      <span className="extract-violation-message">{v.message}</span>
+                                      {!ignored && activeContractId && (
+                                        <button
+                                          type="button"
+                                          className="extract-value-toggle extract-violation-ignore"
+                                          disabled={ignoringViolationId === v.id}
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            ignoreViolation(activeContractId, v.id);
+                                          }}
+                                        >
+                                          {ignoringViolationId === v.id ? "处理中" : "忽略"}
+                                        </button>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            );
+                          })()}
                         </div>
                       );
                     })}
                   </div>
+                  {/* Task 5: flat clause list with review actions + click-to-highlight */}
+                  {activeContractDetail?.clauses && activeContractDetail.clauses.length > 0 && (
+                    <div className="extract-clause-list">
+                      <h3 className="extract-clause-list-title">
+                        条款列表
+                        <span className="extract-clause-count">{activeContractDetail.clauses.length} 条</span>
+                      </h3>
+                      {activeContractDetail.clauses.map((clause) => {
+                        const title = clause.clause_title ?? clause.clause_type ?? "条款";
+                        const reviewStatus = clauseReviewStates[clause.id] ?? clause.review_status;
+                        const isExpanded = expandedClauseIds.has(clause.id);
+                        const canHighlight = clause.page_no != null && clause.bbox != null;
+                        const isReviewing = reviewingClauseId === clause.id;
+                        const contractId = activeItem?.upload?.contract_id;
+                        const hasLongContent = clause.content.length > 72 || clause.content.includes("\n");
+
+                        const handleClauseHighlight = (e?: ReactMouseEvent | ReactKeyboardEvent) => {
+                          if (!canHighlight || clause.page_no == null || !clause.bbox) return;
+                          if (e && "target" in e) {
+                            const t = e.target as HTMLElement;
+                            if (t.closest("button, input, a, [role=button]")) return;
+                          }
+                          setHighlightTarget({ pageNo: clause.page_no, bbox: clause.bbox });
+                        };
+
+                        return (
+                          <div
+                            className={`extract-clause-item${canHighlight ? " clickable" : ""}`}
+                            key={clause.id}
+                            onClick={canHighlight ? handleClauseHighlight : undefined}
+                            onKeyDown={
+                              canHighlight
+                                ? (e) => {
+                                    if (e.key === "Enter" || e.key === " ") {
+                                      e.preventDefault();
+                                      handleClauseHighlight(e);
+                                    }
+                                  }
+                                : undefined
+                            }
+                            role={canHighlight ? "button" : undefined}
+                            tabIndex={canHighlight ? 0 : undefined}
+                            aria-label={
+                              canHighlight ? `高亮第 ${clause.page_no} 页条款原文位置` : undefined
+                            }
+                          >
+                            <div className="extract-clause-item-head">
+                              <strong className="extract-clause-title">{title}</strong>
+                              {clause.page_no != null && (
+                                <small className="extract-clause-page">第 {clause.page_no} 页</small>
+                              )}
+                              {reviewStatus && reviewStatus !== "extracted" && (
+                                <small className={`extract-review-badge ${reviewStatus}`}>
+                                  {reviewStatusLabel(reviewStatus)}
+                                </small>
+                              )}
+                            </div>
+                            <div
+                              className={`extract-clause-content${isExpanded ? " expanded" : ""}`}
+                            >
+                              {clause.content}
+                            </div>
+                            <div className="extract-clause-item-foot">
+                              {hasLongContent && (
+                                <button
+                                  type="button"
+                                  className="extract-value-toggle"
+                                  aria-expanded={isExpanded}
+                                  onClick={() => {
+                                    setExpandedClauseIds((prev) => {
+                                      const next = new Set(prev);
+                                      if (next.has(clause.id)) next.delete(clause.id);
+                                      else next.add(clause.id);
+                                      return next;
+                                    });
+                                  }}
+                                >
+                                  {isExpanded ? "收起" : "展开"}
+                                </button>
+                              )}
+                              {contractId && (
+                                <div className="extract-clause-actions">
+                                  <button
+                                    type="button"
+                                    className="extract-value-toggle"
+                                    disabled={isReviewing || reviewStatus === "approved"}
+                                    onClick={() => handleClauseReview(contractId, clause.id, "approve")}
+                                  >
+                                    {isReviewing ? "处理中" : "通过"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="extract-value-toggle"
+                                    disabled={isReviewing || reviewStatus === "rejected"}
+                                    onClick={() => handleClauseReview(contractId, clause.id, "reject")}
+                                  >
+                                    {isReviewing ? "处理中" : "驳回"}
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                   </>
                 ) : showPendingFieldRows ? (
                   <div className="extract-card-list">
