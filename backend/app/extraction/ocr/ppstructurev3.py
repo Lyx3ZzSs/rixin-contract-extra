@@ -20,6 +20,7 @@ from __future__ import annotations
 import base64
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import httpx
@@ -78,8 +79,11 @@ class PPStructureV3Provider(OCRProvider):
         Because we sent OUR images, the returned bbox lives in each image's
         pixel space — identical to the page image we persist for display.
         """
-        pages: list[OCRPageResult] = []
-        for idx, img_bytes in enumerate(page_images, start=1):
+        if not page_images:
+            return OCRDetailedResult(pages=[], provider="ppstructurev3")
+
+        def extract_one(idx_and_bytes: tuple[int, bytes]) -> OCRPageResult:
+            idx, img_bytes = idx_and_bytes
             encoded = base64.b64encode(img_bytes).decode("ascii")
             payload = {"file": encoded, "fileType": 1, "useLayout": True, "useTable": True}
             data = self._http_post(self._url, payload)
@@ -87,12 +91,20 @@ class PPStructureV3Provider(OCRProvider):
             page_raw = pages_raw[0] if pages_raw else {}
             blocks = self._blocks_for(page_raw)
             pruned = page_raw.get("prunedResult") or {}
-            pages.append(OCRPageResult(
+            return OCRPageResult(
                 page_no=idx,
                 blocks=blocks,
                 width=pruned.get("width"),
                 height=pruned.get("height"),
-            ))
+            )
+
+        indexed_images = list(enumerate(page_images, start=1))
+        concurrency = max(1, min(settings.ppocr_page_concurrency, len(indexed_images)))
+        if concurrency == 1:
+            pages = [extract_one(item) for item in indexed_images]
+        else:
+            with ThreadPoolExecutor(max_workers=concurrency) as executor:
+                pages = list(executor.map(extract_one, indexed_images))
         return OCRDetailedResult(pages=pages, provider="ppstructurev3")
 
     # ------------------------------------------------------------------

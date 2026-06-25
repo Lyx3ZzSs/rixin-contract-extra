@@ -174,6 +174,30 @@ async def test_extract_prepared_contract_passes_selected_fields(
         assert task.task_payload["fields"][0]["field_name"] == "甲方名称"
 
 
+@pytest.mark.asyncio
+async def test_get_page_image_generates_missing_pdf_page_on_demand(
+    client,
+    sample_pdf_content,
+    tmp_upload_dir,
+):
+    from app.services.file_service import page_image_path
+
+    prepare_resp = await client.post(
+        "/api/v1/contracts/prepare",
+        files={"file": ("lazy-page.pdf", io.BytesIO(sample_pdf_content), "application/pdf")},
+    )
+    assert prepare_resp.status_code == 201
+    contract_id = uuid.UUID(prepare_resp.json()["data"]["contract_id"])
+    assert not page_image_path(contract_id, 1).exists()
+
+    image_resp = await client.get(f"/api/v1/contracts/{contract_id}/pages/1/image")
+
+    assert image_resp.status_code == 200
+    assert image_resp.headers["content-type"].startswith("image/png")
+    assert image_resp.content[:8] == b"\x89PNG\r\n\x1a\n"
+    assert page_image_path(contract_id, 1).exists()
+
+
 # ---- list ----
 
 @pytest.mark.asyncio
@@ -228,12 +252,12 @@ async def test_get_page_image_returns_png(client, sample_pdf_content, tmp_upload
 
 @pytest.mark.asyncio
 async def test_get_page_image_not_found(client, sample_pdf_content, tmp_upload_dir):
-    """Contract exists but page image absent → 404; unknown contract → 404."""
+    """Out-of-range page and unknown contract still return 404."""
     resp = await _prepare(client, "pages.pdf", sample_pdf_content)
     cid = resp.json()["data"]["contract_id"]
 
-    # contract exists, no page image persisted
-    missing = await client.get(f"/api/v1/contracts/{cid}/pages/1/image")
+    # contract exists, but page number is outside the source PDF
+    missing = await client.get(f"/api/v1/contracts/{cid}/pages/999/image")
     assert missing.status_code == 404
 
     # unknown contract

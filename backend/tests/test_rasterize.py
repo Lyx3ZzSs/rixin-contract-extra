@@ -2,7 +2,7 @@
 import fitz
 
 from app.extraction.base import PageImage
-from app.extraction.ocr.rasterize import rasterize_pdf_to_pages
+from app.extraction.ocr.rasterize import rasterize_pdf_page, rasterize_pdf_to_pages
 
 
 def _make_pdf(tmp_path, pages: int = 2) -> str:
@@ -42,3 +42,13 @@ def test_rasterize_returns_page_image_type(tmp_path):
 
     assert isinstance(img, PageImage)
     assert img.page_no == 1
+
+
+def test_rasterize_single_pdf_page(tmp_path):
+    pdf = _make_pdf(tmp_path, pages=3)
+    img = rasterize_pdf_page(pdf, page_no=2, dpi=144)
+
+    assert isinstance(img, PageImage)
+    assert img.page_no == 2
+    assert img.width and img.height
+    assert img.png_bytes[:8] == b"\x89PNG\r\n\x1a\n"

@@ -14,6 +14,7 @@ from sqlalchemy.orm import selectinload
 
 from app.database import get_db
 from app.extraction.base import FieldSpec
+from app.extraction.ocr.rasterize import rasterize_pdf_page
 from app.models.contract import Contract, ContractFile
 from app.schemas.contract import (
     ApiResponse,
@@ -298,13 +299,29 @@ async def get_page_image(
     db: AsyncSession = Depends(get_db),
 ):
     """Serve the rasterized page image (Tier 2 highlight surface)."""
-    exists = await db.execute(select(Contract.id).where(Contract.id == contract_id))
-    if exists.scalar_one_or_none() is None:
+    contract = await _load_contract_detail(db, contract_id)
+    if not contract:
         raise HTTPException(404, "Contract not found")
 
     path = file_service.page_image_path(contract_id, page_no)
     if not path.exists():
-        raise HTTPException(404, "Page image not found")
+        contract_file = contract.files[0] if contract.files else None
+        if not contract_file:
+            raise HTTPException(404, "Contract file not found")
+        source_path = Path(contract_file.file_path)
+        if not source_path.exists():
+            raise HTTPException(404, "File not found on disk")
+        if contract_file.file_type.lower() != "pdf":
+            raise HTTPException(404, "Page image not found")
+        try:
+            page_image = rasterize_pdf_page(
+                str(source_path),
+                page_no=page_no,
+                dpi=settings.ppocr_pdf_dpi,
+            )
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        file_service.save_page_image(contract_id, page_no, page_image.png_bytes)
 
     return _FileResponse(
         path=str(path),

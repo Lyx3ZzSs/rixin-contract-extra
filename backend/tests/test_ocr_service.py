@@ -171,12 +171,15 @@ def test_ocr_log_truncate_helper_limits_text():
 
 
 @pytest.mark.asyncio
-async def test_ocr_service_persists_page_images(sample_pdf_content, tmp_upload_dir):
-    """process() must rasterize the PDF and persist one page image per page."""
+async def test_ocr_service_persists_page_images_for_scanned_pdf(sample_pdf_content, tmp_upload_dir, monkeypatch):
+    """Scanned PDFs must rasterize and persist page images before image OCR."""
     from tests.conftest import test_session_factory
+    from app.services import ocr_service
     from app.services.file_service import save_file, page_image_path
     from app.services.contract_service import create_contract
     from app.models.contract import ContractFile
+
+    monkeypatch.setattr(ocr_service.OCRService, "_is_text_pdf", classmethod(lambda cls, _fp, _ft: False))
 
     file_path, file_type, _size, content_hash = save_file(sample_pdf_content, "pages.pdf")
     async with test_session_factory() as db:
@@ -195,11 +198,11 @@ async def test_ocr_service_persists_page_images(sample_pdf_content, tmp_upload_d
 
 @pytest.mark.asyncio
 async def test_ocr_service_uses_text_pdf_path_when_text_layer_is_available(tmp_upload_dir, monkeypatch):
-    """Text PDFs should persist preview images but avoid image OCR."""
+    """Text PDFs should avoid image OCR and not block on preview rasterization."""
     fitz = pytest.importorskip("fitz")
     from tests.conftest import test_session_factory
     from app.services import ocr_service
-    from app.services.file_service import save_file, page_image_path
+    from app.services.file_service import save_file
     from app.services.contract_service import create_contract
     from app.models.contract import ContractFile
     from app.models.ocr import OCRBlock
@@ -230,7 +233,25 @@ async def test_ocr_service_uses_text_pdf_path_when_text_layer_is_available(tmp_u
             calls.append("extract_from_images")
             raise AssertionError("image OCR should not run for text PDFs")
 
+    background_jobs: list[tuple[str, str]] = []
+
+    def fake_start_background_pages(_contract_id, bg_file_path, bg_file_type):
+        background_jobs.append((bg_file_path, bg_file_type))
+
+    def fail_sync_prepare(_file_path, _file_type):
+        raise AssertionError("text PDF OCR should not synchronously rasterize preview images")
+
     monkeypatch.setattr(ocr_service, "get_ocr_provider", lambda: TextPdfProvider())
+    monkeypatch.setattr(
+        ocr_service.OCRService,
+        "_start_background_page_image_generation",
+        classmethod(lambda cls, contract_id, bg_file_path, bg_file_type: fake_start_background_pages(contract_id, bg_file_path, bg_file_type)),
+    )
+    monkeypatch.setattr(
+        ocr_service.OCRService,
+        "_prepare_page_images",
+        classmethod(lambda cls, prep_file_path, prep_file_type: fail_sync_prepare(prep_file_path, prep_file_type)),
+    )
 
     async with test_session_factory() as db:
         contract = await create_contract(db, content_hash=content_hash)
@@ -248,8 +269,7 @@ async def test_ocr_service_uses_text_pdf_path_when_text_layer_is_available(tmp_u
         contract_id = contract.id
 
     assert calls == ["extract_detailed"]
-    page_path = page_image_path(contract_id, 1)
-    assert page_path.exists()
+    assert background_jobs == [(file_path, file_type)]
 
     async with test_session_factory() as db:
         block = (await db.execute(select(OCRBlock).where(OCRBlock.contract_id == contract_id))).scalar_one()

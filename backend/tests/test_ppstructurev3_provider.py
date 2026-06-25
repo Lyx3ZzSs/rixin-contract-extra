@@ -4,6 +4,8 @@ The provider is given a captured response payload matching the real PaddleX
 PP-StructureV3 serving contract and must turn it into an ``OCRDetailedResult``
 with correct block types, page numbers and table text.
 """
+import threading
+import time
 from unittest.mock import MagicMock
 
 import httpx
@@ -151,3 +153,39 @@ def test_extract_from_images_empty_input():
     provider = PPStructureV3Provider()
     result = provider.extract_from_images([])
     assert result.pages == []
+
+
+def test_extract_from_images_uses_configured_page_concurrency(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "ppocr_page_concurrency", 2)
+    provider = PPStructureV3Provider()
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    one_page = {
+        "result": {"layoutParsingResults": [{"prunedResult": {
+            "width": 800, "height": 600,
+            "parsing_res_list": [
+                {"block_label": "text", "block_content": "hello", "block_bbox": [10, 20, 110, 50]},
+            ],
+        }}]},
+    }
+
+    def fake_post(_url, _payload):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.05)
+        with lock:
+            active -= 1
+        return one_page
+
+    monkeypatch.setattr(provider, "_http_post", fake_post)
+
+    result = provider.extract_from_images([b"img1", b"img2", b"img3", b"img4"])
+
+    assert len(result.pages) == 4
+    assert max_active > 1
