@@ -1,5 +1,5 @@
 import { forwardRef, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type UIEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from "lucide-react";
+import { ChevronLeft, ChevronRight, MapPin, ZoomIn, ZoomOut } from "lucide-react";
 import * as pdfjsLib from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
 import type { PDFDocumentProxy, RenderTask } from "pdfjs-dist/types/src/pdf";
@@ -12,7 +12,6 @@ import {
   getContractDetail,
   getTask,
   prepareContract,
-  reviewClause,
   reviewField,
   reviewViolation,
   startContractExtraction,
@@ -262,13 +261,6 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
   const [ignoredViolationIds, setIgnoredViolationIds] = useState<Set<string>>(new Set());
   const [expandedViolationFieldKeys, setExpandedViolationFieldKeys] = useState<Set<string>>(new Set());
   const [ignoringViolationId, setIgnoringViolationId] = useState<string | null>(null);
-  // Task 5: clause list state. clauseReviewStates holds per-clause review_status for
-  // optimistic badge updates after approve/reject without a full contract refetch.
-  // expandedClauseIds toggles the content truncation per clause item.
-  const [clauseReviewStates, setClauseReviewStates] = useState<Record<string, string>>({});
-  const [expandedClauseIds, setExpandedClauseIds] = useState<Set<string>>(new Set());
-  const [reviewingClauseId, setReviewingClauseId] = useState<string | null>(null);
-
   const updateItem = useCallback((itemId: string, patch: Partial<BatchFileItem>) => {
     setItems((currentItems) =>
       currentItems.map((item) => (item.id === itemId ? { ...item, ...patch } : item)),
@@ -435,21 +427,6 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
     }
   }
 
-  // Task 5: approve or reject a single clause. Updates the local clauseReviewStates
-  // map so the badge reflects the new status immediately without a full refetch.
-  async function handleClauseReview(contractId: string, clauseId: string, action: "approve" | "reject") {
-    setReviewingClauseId(clauseId);
-    try {
-      const updated = await reviewClause(contractId, clauseId, { action });
-      setClauseReviewStates((prev) => ({ ...prev, [clauseId]: updated.review_status }));
-    } catch (err) {
-      console.error("clause review failed", err);
-      alert("条款复核失败，请重试");
-    } finally {
-      setReviewingClauseId(null);
-    }
-  }
-
   async function openFieldLibraryPicker() {
     setFieldActionMessage("");
     setSelectedLibraryKeys(new Set());
@@ -596,12 +573,26 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
       applyCurrentBatchPatch(item.id, runId, { ocrStatus: "processing", ocrStage: "uploaded", error: "" });
       const uploadResult = await ensurePrepareStarted(item.file);
       applyCurrentBatchPatch(item.id, runId, { upload: uploadResult, ocrStage: "uploaded" });
+      // ── T1 preview (FlatPdfPreview) renders during this wait ──
       await waitForTaskCompletion(
         uploadResult.task_id,
         (status) => applyCurrentBatchPatch(item.id, runId, { ocrStage: status }),
         "OCR预处理失败",
       );
-      applyCurrentBatchPatch(item.id, runId, { ocrStatus: "completed", ocrStage: "completed", error: "" });
+      // OCR is done — page images exist on disk. Fetch ContractDetail now to
+      // get page_count so PageImagePreview (T2) renders the correct page count
+      // immediately. On failure we still mark OCR completed; pageCount defaults to 1.
+      try {
+        const detail = await getContractDetail(uploadResult.contract_id);
+        applyCurrentBatchPatch(item.id, runId, {
+          ocrStatus: "completed",
+          ocrStage: "completed",
+          contractDetail: detail,
+          error: "",
+        });
+      } catch {
+        applyCurrentBatchPatch(item.id, runId, { ocrStatus: "completed", ocrStage: "completed", error: "" });
+      }
     } catch (err) {
       applyCurrentBatchPatch(item.id, runId, {
         ocrStatus: "failed",
@@ -659,6 +650,7 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
     setIsExtracting(true);
     setExtractionError("");
     setExpandedResultKeys(new Set());
+    setHighlightTarget(null);
     setCurrentStep(3);
     const runId = batchRunIdRef.current;
     const selectedFields = fields.map((field) => ({ ...field }));
@@ -792,6 +784,7 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
       })),
     );
     setExpandedResultKeys(new Set());
+    setHighlightTarget(null);
     setExtractionError("");
     setCurrentStep(2);
   }
@@ -859,6 +852,11 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
   const activeProgressMessage = getBatchProgressMessage(activeItem, isExtracting, stageMessages);
   const pendingFieldValueText = activeItem ? getPendingFieldValueText(activeItem) : "等待提取...";
   const showPendingFieldRows = Boolean(activeItem && !results && shouldShowPendingFieldRows(activeItem, isExtracting));
+  const shouldUseTracePreview = Boolean(
+    activeItem?.upload?.contract_id &&
+    activeItem.ocrStatus === "completed" &&
+    highlightTarget,
+  );
 
   return (
     <section className="extract-flow" aria-labelledby="extract-flow-title">
@@ -929,6 +927,7 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
                   onClick={() => {
                     setActiveItemId(item.id);
                     setExpandedResultKeys(new Set());
+                    setHighlightTarget(null);
                   }}
                 >
                   <span>{index + 1}.</span>
@@ -943,18 +942,18 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
             <div className="extract-document-page">
               {!activeItem || !activeFile ? (
                 <DocumentFallback file={initialItems[0].file} message="请选择合同文件" />
-              ) : activeItem.upload?.contract_id ? (
+              ) : shouldUseTracePreview && activeItem.upload?.contract_id ? (
                 // T2 OCR traceability preview: per-page OCR images + bbox highlight.
-                // Primary preview once the contract exists (server rasterizes PDFs to
-                // page images). pageCount defaults to 1 until ContractDetail lands.
+                // Switch only when the user requests source traceability; keeping
+                // FlatPdfPreview mounted through OCR completion avoids a visible flash.
                 <PageImagePreview
                   contractId={activeItem.upload.contract_id}
                   pageCount={activeContractDetail?.page_count ?? 1}
                   target={highlightTarget}
                 />
               ) : isPdf ? (
-                // Pre-contract fallback: PDF uploaded but not yet processed/rasterized —
-                // render directly via pdfjs until a contract_id is available.
+                // T1 fallback: render directly via pdfjs during upload / OCR processing,
+                // before page images have been rasterized by the server.
                 <FlatPdfPreview src={activeItem.documentUrl} file={activeFile} />
               ) : (
                 <DocumentFallback file={activeFile} />
@@ -1087,8 +1086,20 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
                       // both a page_no and a bbox, and the card isn't in review-edit mode.
                       const cardBBox = r.field_id ? fieldBBoxById.get(r.field_id) ?? null : null;
                       const isReviewingThis = reviewingFieldKey === r.field_key;
+                      const hasTracePage = r.page_no != null;
+                      const hasTraceBBox = cardBBox != null;
+                      const isHighlightActive = Boolean(
+                        highlightTarget &&
+                        r.page_no != null &&
+                        highlightTarget.pageNo === r.page_no &&
+                        cardBBox &&
+                        highlightTarget.bbox.x1 === cardBBox.x1 &&
+                        highlightTarget.bbox.y1 === cardBBox.y1 &&
+                        highlightTarget.bbox.x2 === cardBBox.x2 &&
+                        highlightTarget.bbox.y2 === cardBBox.y2,
+                      );
                       const canHighlight =
-                        !isReviewingThis && !batchBusy && r.page_no != null && cardBBox != null;
+                        !isReviewingThis && !batchBusy && hasTracePage && hasTraceBBox;
                       // Task 4: field-level violations for this card. Active ones drive the
                       // red inset bar + severity badge; already-ignored ones are still shown
                       // (greyed) so the reviewer sees what was dismissed.
@@ -1110,7 +1121,7 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
                       };
                       return (
                         <div
-                          className={`extract-card-item result${isLowConfidence ? " low-confidence" : ""}${hasActiveViolation ? " has-violation" : ""}${canHighlight ? " clickable" : ""}`}
+                          className={`extract-card-item result${isLowConfidence ? " low-confidence" : ""}${hasActiveViolation ? " has-violation" : ""}${canHighlight ? " clickable" : ""}${isHighlightActive ? " trace-active" : ""}`}
                           key={resultKey}
                           onClick={canHighlight ? handleCardHighlight : undefined}
                           onKeyDown={
@@ -1239,6 +1250,27 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
                                   {isExpanded ? "收起" : "展开"}
                                 </button>
                               )}
+                              {hasTracePage && (
+                                <button
+                                  type="button"
+                                  className={`extract-trace-button${isHighlightActive ? " active" : ""}`}
+                                  disabled={!canHighlight}
+                                  title={
+                                    canHighlight
+                                      ? `定位第 ${r.page_no} 页原文位置`
+                                      : hasTraceBBox
+                                        ? "当前状态暂不能定位"
+                                        : "已有页码，但暂无可高亮的 OCR 坐标"
+                                  }
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleCardHighlight();
+                                  }}
+                                >
+                                  <MapPin size={13} aria-hidden="true" />
+                                  {canHighlight ? (isHighlightActive ? "已定位" : "定位") : "仅页码"}
+                                </button>
+                              )}
                             </span>
                           )}
                           {(r.page_no != null || r.confidence != null || r.source_text) && (
@@ -1289,112 +1321,6 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
                       );
                     })}
                   </div>
-                  {/* Task 5: flat clause list with review actions + click-to-highlight */}
-                  {activeContractDetail?.clauses && activeContractDetail.clauses.length > 0 && (
-                    <div className="extract-clause-list">
-                      <h3 className="extract-clause-list-title">
-                        条款列表
-                        <span className="extract-clause-count">{activeContractDetail.clauses.length} 条</span>
-                      </h3>
-                      {activeContractDetail.clauses.map((clause) => {
-                        const title = clause.clause_title ?? clause.clause_type ?? "条款";
-                        const reviewStatus = clauseReviewStates[clause.id] ?? clause.review_status;
-                        const isExpanded = expandedClauseIds.has(clause.id);
-                        const canHighlight = clause.page_no != null && clause.bbox != null;
-                        const isReviewing = reviewingClauseId === clause.id;
-                        const contractId = activeItem?.upload?.contract_id;
-                        const hasLongContent = clause.content.length > 72 || clause.content.includes("\n");
-
-                        const handleClauseHighlight = (e?: ReactMouseEvent | ReactKeyboardEvent) => {
-                          if (!canHighlight || clause.page_no == null || !clause.bbox) return;
-                          if (e && "target" in e) {
-                            const t = e.target as HTMLElement;
-                            if (t.closest("button, input, a, [role=button]")) return;
-                          }
-                          setHighlightTarget({ pageNo: clause.page_no, bbox: clause.bbox });
-                        };
-
-                        return (
-                          <div
-                            className={`extract-clause-item${canHighlight ? " clickable" : ""}`}
-                            key={clause.id}
-                            onClick={canHighlight ? handleClauseHighlight : undefined}
-                            onKeyDown={
-                              canHighlight
-                                ? (e) => {
-                                    if (e.key === "Enter" || e.key === " ") {
-                                      e.preventDefault();
-                                      handleClauseHighlight(e);
-                                    }
-                                  }
-                                : undefined
-                            }
-                            role={canHighlight ? "button" : undefined}
-                            tabIndex={canHighlight ? 0 : undefined}
-                            aria-label={
-                              canHighlight ? `高亮第 ${clause.page_no} 页条款原文位置` : undefined
-                            }
-                          >
-                            <div className="extract-clause-item-head">
-                              <strong className="extract-clause-title">{title}</strong>
-                              {clause.page_no != null && (
-                                <small className="extract-clause-page">第 {clause.page_no} 页</small>
-                              )}
-                              {reviewStatus && reviewStatus !== "extracted" && (
-                                <small className={`extract-review-badge ${reviewStatus}`}>
-                                  {reviewStatusLabel(reviewStatus)}
-                                </small>
-                              )}
-                            </div>
-                            <div
-                              className={`extract-clause-content${isExpanded ? " expanded" : ""}`}
-                            >
-                              {clause.content}
-                            </div>
-                            <div className="extract-clause-item-foot">
-                              {hasLongContent && (
-                                <button
-                                  type="button"
-                                  className="extract-value-toggle"
-                                  aria-expanded={isExpanded}
-                                  onClick={() => {
-                                    setExpandedClauseIds((prev) => {
-                                      const next = new Set(prev);
-                                      if (next.has(clause.id)) next.delete(clause.id);
-                                      else next.add(clause.id);
-                                      return next;
-                                    });
-                                  }}
-                                >
-                                  {isExpanded ? "收起" : "展开"}
-                                </button>
-                              )}
-                              {contractId && (
-                                <div className="extract-clause-actions">
-                                  <button
-                                    type="button"
-                                    className="extract-value-toggle"
-                                    disabled={isReviewing || reviewStatus === "approved"}
-                                    onClick={() => handleClauseReview(contractId, clause.id, "approve")}
-                                  >
-                                    {isReviewing ? "处理中" : "通过"}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="extract-value-toggle"
-                                    disabled={isReviewing || reviewStatus === "rejected"}
-                                    onClick={() => handleClauseReview(contractId, clause.id, "reject")}
-                                  >
-                                    {isReviewing ? "处理中" : "驳回"}
-                                  </button>
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
                   </>
                 ) : showPendingFieldRows ? (
                   <div className="extract-card-list">

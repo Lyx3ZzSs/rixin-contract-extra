@@ -69,8 +69,9 @@ class OCRService:
     ) -> OCRDetailedResult:
         """Run OCR and persist block-level results + page images.
 
-        Tier 2: rasterize locally so bbox lives in the same pixel space as the
-        page images we serve for highlight overlay.
+        Text PDFs are parsed through the provider's PDF-text path. Scanned PDFs
+        and image uploads use page-image OCR. We still persist page images for
+        preview/highlight traceability.
         """
         provider = get_ocr_provider()
 
@@ -85,9 +86,13 @@ class OCRService:
                     file_service.save_page_image(contract_id, img.page_no, img.png_bytes)
             await asyncio.to_thread(_persist)
 
-        # 2. OCR — prefer image input (bbox in our pixel space); fall back to
-        #    legacy PDF-bytes path when disabled or unsupported.
-        if settings.ocr_rasterize_locally and page_images:
+        # 2. OCR — text PDFs keep native text extraction; scanned PDFs/images
+        #    use page-image OCR so bbox stays in the saved image pixel space.
+        is_text_pdf = cls._is_text_pdf(file_path, file_type)
+        if is_text_pdf:
+            result = await asyncio.to_thread(provider.extract_detailed, file_path, file_type)
+            cls._scale_pdf_text_result_to_page_images(result, page_images)
+        elif settings.ocr_rasterize_locally and page_images:
             try:
                 result = await asyncio.to_thread(
                     provider.extract_from_images, [img.png_bytes for img in page_images],
@@ -125,6 +130,65 @@ class OCRService:
         # assumes PNG input. Current contract uploads are PDFs, so this branch is
         # rarely hit in practice.
         return [PageImage(page_no=1, png_bytes=Path(file_path).read_bytes())]
+
+    @classmethod
+    def _is_text_pdf(cls, file_path: str, file_type: str) -> bool:
+        """Return True when a PDF has enough native text to avoid image OCR."""
+        if file_type.lower() != "pdf" and Path(file_path).suffix.lower() != ".pdf":
+            return False
+        try:
+            import fitz
+
+            doc = fitz.open(file_path)
+            try:
+                page_count = len(doc)
+                if page_count == 0:
+                    return False
+                text_len = 0
+                text_page_count = 0
+                for page in doc:
+                    text = page.get_text("text").strip()
+                    if text:
+                        text_page_count += 1
+                        text_len += len(text)
+                text_page_ratio = text_page_count / page_count
+                return (
+                    text_len >= settings.ppocr_pdf_text_min_chars
+                    and text_page_ratio >= settings.ppocr_pdf_text_page_ratio
+                )
+            finally:
+                doc.close()
+        except Exception:
+            logger.warning("PDF text-layer probe failed; falling back to image OCR", exc_info=True)
+            return False
+
+    @classmethod
+    def _scale_pdf_text_result_to_page_images(
+        cls,
+        result: OCRDetailedResult,
+        page_images: list[PageImage],
+    ) -> None:
+        """Scale PDF-point text bboxes into saved page-image pixel space."""
+        image_by_page = {img.page_no: img for img in page_images if img.width and img.height}
+        for page in result.pages:
+            image = image_by_page.get(page.page_no)
+            if not image or not page.width or not page.height:
+                continue
+            scale_x = image.width / page.width
+            scale_y = image.height / page.height
+            if scale_x <= 0 or scale_y <= 0:
+                continue
+            for block in page.blocks:
+                if not block.bbox:
+                    continue
+                block.bbox = BBox(
+                    x1=block.bbox.x1 * scale_x,
+                    y1=block.bbox.y1 * scale_y,
+                    x2=block.bbox.x2 * scale_x,
+                    y2=block.bbox.y2 * scale_y,
+                )
+            page.width = image.width
+            page.height = image.height
 
     @classmethod
     def _log_ocr_diagnostics(

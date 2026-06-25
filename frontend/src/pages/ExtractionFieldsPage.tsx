@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Plus, RotateCcw, Save, Search, Trash2, X } from "lucide-react";
 
+import { PaginationControls } from "../components/PaginationControls";
 import type { FieldDefinitionItem } from "../lib/api";
 import {
   readExtractionFieldLibrary,
@@ -16,6 +17,7 @@ const EMPTY_DRAFT: FieldDraft = {
   field_name: "",
   description: "",
 };
+const FIELDS_PAGE_SIZE = 10;
 
 export function ExtractionFieldsPage() {
   const [fields, setFields] = useState<FieldDefinitionItem[]>([]);
@@ -25,6 +27,7 @@ export function ExtractionFieldsPage() {
   const [editingFieldKey, setEditingFieldKey] = useState("");
   const [isAdding, setIsAdding] = useState(false);
   const [draft, setDraft] = useState<FieldDraft>(EMPTY_DRAFT);
+  const [fieldsPage, setFieldsPage] = useState(1);
 
   const loadFields = useCallback(async () => {
     setLoading(true);
@@ -56,6 +59,22 @@ export function ExtractionFieldsPage() {
       );
     });
   }, [fields, query]);
+
+  const paginatedFields = useMemo(() => {
+    const start = (fieldsPage - 1) * FIELDS_PAGE_SIZE;
+    return filteredFields.slice(start, start + FIELDS_PAGE_SIZE);
+  }, [filteredFields, fieldsPage]);
+
+  useEffect(() => {
+    setFieldsPage(1);
+  }, [query]);
+
+  useEffect(() => {
+    const totalPages = Math.max(1, Math.ceil(filteredFields.length / FIELDS_PAGE_SIZE));
+    if (fieldsPage > totalPages) {
+      setFieldsPage(totalPages);
+    }
+  }, [filteredFields.length, fieldsPage]);
 
   function updateDraft(key: keyof FieldDraft, value: string) {
     setDraft((currentDraft) => ({ ...currentDraft, [key]: value }));
@@ -203,7 +222,7 @@ export function ExtractionFieldsPage() {
               <span>调整搜索或筛选条件后再试。</span>
             </div>
           ) : (
-            filteredFields.map((field) =>
+            paginatedFields.map((field) =>
               editingFieldKey === field.field_key ? (
                 <FieldEditor
                   key={field.field_key}
@@ -237,6 +256,12 @@ export function ExtractionFieldsPage() {
               ),
             )
           )}
+          <PaginationControls
+            page={fieldsPage}
+            pageSize={FIELDS_PAGE_SIZE}
+            total={filteredFields.length}
+            onPageChange={setFieldsPage}
+          />
         </div>
       </div>
     </section>

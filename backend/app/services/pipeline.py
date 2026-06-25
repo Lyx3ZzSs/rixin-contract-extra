@@ -234,7 +234,6 @@ async def _run_extraction_pipeline_inner(
             from app.services.llm_service import LLMService
             from app.services.violation_service import save_violations
             from app.services import rule_validation_service
-            import asyncio
 
             # --- Field set: user override (task payload) OR classify-driven ---
             field_specs = field_definitions
@@ -286,26 +285,9 @@ async def _run_extraction_pipeline_inner(
                             "Rule validation failed for contract %s",
                             contract_id, exc_info=True,
                         )
-                # Commit Track A's writes so the concurrent Track B writer
-                # (separate session) does not block on this session's lock.
                 await db.commit()
 
-            async def _track_b() -> None:
-                # Track B: separate session (concurrent writer to clauses, WAL-safe).
-                if not settings.enable_clause_split:
-                    return
-                from app.services.clause_service import split_and_save_clauses
-                try:
-                    async with session_factory() as db2:
-                        await split_and_save_clauses(db2, contract_id, ocr_result)
-                        await db2.commit()
-                except Exception:
-                    logger.warning(
-                        "Clause split failed for contract %s",
-                        contract_id, exc_info=True,
-                    )
-
-            await asyncio.gather(_track_a(), _track_b())
+            await _track_a()
 
             now = utc_now()
             contract.extraction_completed_at = now

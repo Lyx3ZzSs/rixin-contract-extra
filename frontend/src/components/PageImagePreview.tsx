@@ -131,6 +131,12 @@ export function PageImagePreview({
               alt={`合同第 ${pageNo} 页`}
               loading="lazy"
               onLoad={(e) => handleImgLoad(pageNo, e.currentTarget)}
+              onError={(e) => {
+                // Safety net: hide broken-image icon when page image fails to
+                // load. With the ocrStatus gating fix this is rare, but guards
+                // against transient network errors or filesystem issues.
+                e.currentTarget.style.display = "none";
+              }}
             />
             {rect && (
               <div

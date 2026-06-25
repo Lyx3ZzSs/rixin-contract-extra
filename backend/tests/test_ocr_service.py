@@ -194,6 +194,73 @@ async def test_ocr_service_persists_page_images(sample_pdf_content, tmp_upload_d
 
 
 @pytest.mark.asyncio
+async def test_ocr_service_uses_text_pdf_path_when_text_layer_is_available(tmp_upload_dir, monkeypatch):
+    """Text PDFs should persist preview images but avoid image OCR."""
+    fitz = pytest.importorskip("fitz")
+    from tests.conftest import test_session_factory
+    from app.services import ocr_service
+    from app.services.file_service import save_file, page_image_path
+    from app.services.contract_service import create_contract
+    from app.models.contract import ContractFile
+    from app.models.ocr import OCRBlock
+    from sqlalchemy import select
+
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "甲方名称：北京日新科技有限公司\n乙方名称：上海恒信信息技术有限公司\n" * 8)
+    pdf_bytes = doc.tobytes()
+    doc.close()
+    file_path, file_type, file_size, content_hash = save_file(pdf_bytes, "text-layer.pdf")
+    calls: list[str] = []
+
+    class TextPdfProvider:
+        def extract_detailed(self, _file_path, _file_type):
+            calls.append("extract_detailed")
+            return OCRDetailedResult(pages=[OCRPageResult(page_no=1, width=612, height=792, blocks=[
+                OCRTextBlock(
+                    block_type="text",
+                    text="甲方名称：北京日新科技有限公司\n乙方名称：上海恒信信息技术有限公司",
+                    bbox=BBox(x1=72, y1=72, x2=420, y2=110),
+                    confidence=1.0,
+                    sort_order=1,
+                ),
+            ])], provider="text-pdf")
+
+        def extract_from_images(self, _page_images):
+            calls.append("extract_from_images")
+            raise AssertionError("image OCR should not run for text PDFs")
+
+    monkeypatch.setattr(ocr_service, "get_ocr_provider", lambda: TextPdfProvider())
+
+    async with test_session_factory() as db:
+        contract = await create_contract(db, content_hash=content_hash)
+        db.add(ContractFile(
+            contract_id=contract.id,
+            file_name="text-layer.pdf",
+            file_path=file_path,
+            file_type=file_type,
+            file_size=file_size,
+            content_type="application/pdf",
+        ))
+        await db.flush()
+        await OCRService.process(db, contract.id, file_path, file_type)
+        await db.commit()
+        contract_id = contract.id
+
+    assert calls == ["extract_detailed"]
+    page_path = page_image_path(contract_id, 1)
+    assert page_path.exists()
+
+    async with test_session_factory() as db:
+        block = (await db.execute(select(OCRBlock).where(OCRBlock.contract_id == contract_id))).scalar_one()
+
+    assert block.page_width is not None
+    assert block.page_width > 612
+    assert block.bbox is not None
+    assert block.bbox["x1"] > 72
+
+
+@pytest.mark.asyncio
 async def test_ocr_service_rejects_empty_results(monkeypatch):
     """process() must fail when the provider returns no text (new image path)."""
     from app.services import ocr_service

@@ -1,6 +1,5 @@
 import type {
   ApiResponse,
-  ClauseDetail,
   ContractBrief,
   ContractDetail,
   ContractList,
@@ -295,28 +294,6 @@ export async function reviewField(
     body: JSON.stringify(body),
   });
   return parseJsonResponse<FieldDetail>(response);
-}
-
-export interface ClauseReviewRequest {
-  action: "modify" | "approve" | "reject";
-  new_value?: string;
-  comment?: string;
-}
-
-export async function reviewClause(
-  contractId: string,
-  clauseId: string,
-  body: ClauseReviewRequest,
-): Promise<ClauseDetail> {
-  const response = await fetch(
-    toApiUrl(`/api/v1/contracts/${contractId}/clauses/${clauseId}/review`),
-    {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify({ ...body, reviewer_id: "web" }),
-    },
-  );
-  return parseJsonResponse<ClauseDetail>(response);
 }
 
 export interface ViolationReviewRequest {

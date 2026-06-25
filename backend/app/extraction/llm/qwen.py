@@ -84,14 +84,15 @@ def _build_dynamic_prompt(
 2. 如果字段在原文中没有明确出现，field_value 返回 null。
 3. 每个字段必须返回 source_text（摘录原文中对应片段）。
 4. 每个字段必须返回 source_page。
-5. 每个字段必须返回 confidence（0到1之间的浮点数）。
-6. 必须覆盖“需要抽取的字段”中的每一个 field_key，每个 field_key 只能出现一次。
-7. 不得新增未请求的字段，不得改写 field_key。
-8. source_text 必须是合同原文片段；如果 field_value 为 null，则 source_text 和 source_page 也返回 null。
-9. confidence 按证据明确程度给分：原文直接命中且字段含义清晰时较高；需从上下文判断、存在多个候选或表述不完整时降低。
-10. 可以在顶层返回 contract_type 和 contract_type_confidence；无法判断时返回 null 和 0。
-11. 不允许输出 Markdown，只输出一个合法的 JSON 对象。
-12. 顶层必须包含 fields 数组，不允许把 field_key 作为顶层字段名。
+5. 每个字段可以返回 source_bbox，格式为 [x1, y1, x2, y2]；只有当输入原文中明确提供坐标时才返回，不能可靠定位时返回 null，不得估算或编造。
+6. 每个字段必须返回 confidence（0到1之间的浮点数）。
+7. 必须覆盖“需要抽取的字段”中的每一个 field_key，每个 field_key 只能出现一次。
+8. 不得新增未请求的字段，不得改写 field_key。
+9. source_text 必须是合同原文片段；如果 field_value 为 null，则 source_text、source_page 和 source_bbox 也返回 null。
+10. confidence 按证据明确程度给分：原文直接命中且字段含义清晰时较高；需从上下文判断、存在多个候选或表述不完整时降低。
+11. 可以在顶层返回 contract_type 和 contract_type_confidence；无法判断时返回 null 和 0。
+12. 不允许输出 Markdown，只输出一个合法的 JSON 对象。
+13. 顶层必须包含 fields 数组，不允许把 field_key 作为顶层字段名。
 
 输出格式示例：
 {{
@@ -102,6 +103,7 @@ def _build_dynamic_prompt(
       "field_value": "示例公司",
       "source_text": "甲方：示例公司",
       "source_page": 1,
+      "source_bbox": null,
       "confidence": 0.95
     }}
   ],

@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from app.extraction.base import ClauseSegment, ExtractedField, ExtractionResult, FieldSpec
 from app.models.contract import ContractClause, ExtractedField as ExtractedFieldRecord
+from app.models.ocr import OCRBlock
 from app.services.clause_service import _classify_clause_type
 from app.services.rule_validation_service import validate_fields
 
@@ -109,6 +110,60 @@ async def test_extract_and_save_uses_request_scoped_fields(monkeypatch):
     assert [field.field_key for field in captured["field_definitions"]] == ["party-a-name"]
     assert len(records) == 1
     assert records[0].field_key == "party-a-name"
+
+
+@pytest.mark.asyncio
+async def test_extract_and_save_derives_bbox_from_source_text_ocr_block(monkeypatch):
+    from tests.conftest import test_session_factory
+    from app.services.contract_service import create_contract
+    from app.services.extraction_service import extract_and_save
+    from app.services.llm_service import LLMService
+
+    selected_field = FieldSpec(field_key="party-a-name", field_name="甲方名称")
+
+    async def fake_extract(_full_text: str, _contract_type: str | None = None, field_definitions=None):
+        return ExtractionResult(
+            fields=[
+                ExtractedField(
+                    field_key="party-a-name",
+                    field_name="甲方名称",
+                    value="北京日新科技有限公司",
+                    source_text="甲方：北京日新科技有限公司",
+                    page_no=1,
+                    confidence=0.96,
+                ),
+            ],
+        )
+
+    monkeypatch.setattr(LLMService, "extract_fields_from_text", fake_extract)
+
+    async with test_session_factory() as db:
+        contract = await create_contract(db, content_hash="derive-field-bbox")
+        db.add(OCRBlock(
+            contract_id=contract.id,
+            page_no=1,
+            block_type="text",
+            text="甲方：北京日新科技有限公司",
+            bbox={"x1": 120, "y1": 140, "x2": 520, "y2": 175},
+            confidence=0.98,
+            sort_order=1,
+            page_width=1240,
+            page_height=1754,
+        ))
+        await extract_and_save(
+            db,
+            contract.id,
+            "甲方：北京日新科技有限公司",
+            field_definitions=[selected_field],
+        )
+        await db.commit()
+
+        result = await db.execute(
+            select(ExtractedFieldRecord).where(ExtractedFieldRecord.contract_id == contract.id)
+        )
+        record = result.scalar_one()
+
+    assert record.bbox == {"x1": 120, "y1": 140, "x2": 520, "y2": 175}
 
 
 @pytest.mark.asyncio

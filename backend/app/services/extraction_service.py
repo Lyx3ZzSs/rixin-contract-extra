@@ -15,12 +15,14 @@ from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.extraction.base import (
+    BBox,
     FieldSpec,
     ExtractedField as ExtractedFieldData,
     ExtractionResult,
 )
 from app.models.contract import ExtractedField
 from app.models.field_definition import FieldDefinition
+from app.models.ocr import OCRBlock
 from app.services.llm_service import LLMService
 
 logger = logging.getLogger(__name__)
@@ -48,6 +50,79 @@ def _field_summary(field: ExtractedFieldData) -> dict[str, object]:
         "page_no": field.page_no,
         "source_text": _truncate_for_log(field.source_text),
     }
+
+
+def _normalize_match_text(text: str | None) -> str:
+    if not text:
+        return ""
+    return "".join(text.split())
+
+
+def _bbox_from_stored(value: object) -> BBox | None:
+    if value is None:
+        return None
+    if isinstance(value, list) and len(value) == 4:
+        return BBox.from_list(value)
+    try:
+        return BBox.model_validate(value)
+    except Exception:
+        logger.warning("Invalid OCR bbox payload ignored: %r", value)
+        return None
+
+
+async def _attach_source_bboxes(
+    db: AsyncSession,
+    contract_id: uuid.UUID,
+    fields: list[ExtractedFieldData],
+) -> None:
+    """Backfill field bbox from persisted OCR blocks using source_text/page_no.
+
+    LLM extraction operates on text, so it can reliably return source_text and
+    page_no but usually cannot know OCR pixel coordinates. The trace highlight
+    should therefore reuse OCR block coordinates instead of asking the LLM to
+    invent a bbox.
+    """
+    unresolved = [
+        field for field in fields
+        if field.bbox is None and field.source_text and field.value is not None
+    ]
+    if not unresolved:
+        return
+
+    page_numbers = {field.page_no for field in unresolved if field.page_no is not None}
+    has_page_unknown = any(field.page_no is None for field in unresolved)
+    stmt = (
+        select(OCRBlock)
+        .where(OCRBlock.contract_id == contract_id)
+        .where(OCRBlock.bbox.is_not(None))
+        .order_by(OCRBlock.page_no, OCRBlock.sort_order, OCRBlock.id)
+    )
+    if page_numbers and not has_page_unknown:
+        stmt = stmt.where(OCRBlock.page_no.in_(page_numbers))
+
+    rows = list((await db.execute(stmt)).scalars().all())
+    if not rows:
+        return
+
+    for field in unresolved:
+        source = _normalize_match_text(field.source_text)
+        if not source:
+            continue
+        candidates = rows
+        if field.page_no is not None:
+            candidates = [row for row in rows if row.page_no == field.page_no]
+        for row in candidates:
+            block_text = _normalize_match_text(row.text)
+            if not block_text:
+                continue
+            if source in block_text or block_text in source:
+                bbox = _bbox_from_stored(row.bbox)
+                if bbox is None:
+                    continue
+                field.bbox = bbox
+                if field.page_no is None:
+                    field.page_no = row.page_no
+                break
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +268,7 @@ async def extract_and_save(
         )
 
     if result.fields:
+        await _attach_source_bboxes(db, contract_id, result.fields)
         await save_fields(db, contract_id, result.fields, field_map)
 
     return result

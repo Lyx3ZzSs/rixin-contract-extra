@@ -1,12 +1,12 @@
-"""Tests for Phase 2 extraction-pipeline wiring (classify/rule/clause)."""
+"""Tests for extraction-pipeline wiring (classify/rule, no clause split by default)."""
 import pytest
 from sqlalchemy import select
 
 
 @pytest.mark.asyncio
-async def test_extraction_pipeline_writes_clauses_and_violations(monkeypatch):
+async def test_extraction_pipeline_writes_violations_without_default_clause_split(monkeypatch):
     """End-to-end: extraction pipeline runs classify (authoritative type) +
-    Track A (extract -> rule-validate -> violations) + Track B (clause-split)."""
+    field extraction + rule validation, without adding clause-management output."""
     from tests.conftest import test_session_factory
     from app.services import pipeline, task_service
     from app.services.contract_service import create_contract
@@ -62,7 +62,7 @@ async def test_extraction_pipeline_writes_clauses_and_violations(monkeypatch):
         violations = (await db.execute(select(RuleViolation).where(RuleViolation.contract_id == contract_id))).scalars().all()
         c = (await db.execute(select(Contract).where(Contract.id == contract_id))).scalar_one()
 
-    assert len(clauses) > 0                                   # Track B ran
+    assert clauses == []                                      # clause split is not part of extraction UX
     assert any(v.rule_key == "required_fields" for v in violations)  # Track A rule ran
     assert c.contract_type == "service"                       # classify authoritative
 

@@ -118,7 +118,6 @@ class ContractDetail(BaseModel):
     updated_at: datetime
     files: list[FileBrief] = []
     fields: list[FieldDetail] = []
-    clauses: list[ClauseDetail] = []
     violations: list[RuleViolationDetail] = []
 
     model_config = {"from_attributes": True}

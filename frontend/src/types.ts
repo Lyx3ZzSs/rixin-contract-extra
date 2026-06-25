@@ -115,20 +115,6 @@ export interface FieldDetail {
   reviewed_at: string | null;
 }
 
-export interface ClauseDetail {
-  id: string;
-  clause_type: string | null;
-  clause_title: string | null;
-  content: string;
-  page_no: number | null;
-  confidence: number | null;
-  level?: number;
-  parent_id?: string | null;
-  bbox?: BBox | null;
-  page_end?: number | null;
-  review_status: string;
-}
-
 export interface Violation {
   id: string;
   field_key: string | null;
@@ -152,7 +138,6 @@ export interface ContractDetail {
   violations?: Violation[];
   files: FileBrief[];
   fields: FieldDetail[];
-  clauses: ClauseDetail[];
   created_at: string;
   updated_at: string;
 }

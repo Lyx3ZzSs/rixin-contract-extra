@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { downloadContractFileUrl, getContractDetail, listContracts, listReviewRecords, reviewField } from "../lib/api";
+import { PaginationControls } from "../components/PaginationControls";
 import type { ReviewRecord } from "../lib/api";
 import { downloadExtractionResultsJson } from "../lib/excelExport";
 import { reviewStatusLabel } from "../lib/reviewStatus";
@@ -16,6 +17,7 @@ const statusLabels: Record<TaskStatus, string> = {
   COMPLETED: "已完成",
   FAILED: "失败",
 };
+const RECORDS_PAGE_SIZE = 10;
 
 export function ExtractionRecordsPage({ onCreateExtraction }: ExtractionRecordsPageProps) {
   const [records, setRecords] = useState<ExtractionRecordSummary[]>([]);
@@ -29,6 +31,8 @@ export function ExtractionRecordsPage({ onCreateExtraction }: ExtractionRecordsP
   const [editingResultId, setEditingResultId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [recordsPage, setRecordsPage] = useState(1);
+  const [recordsTotal, setRecordsTotal] = useState(0);
 
   useEffect(() => {
     let isCurrent = true;
@@ -37,10 +41,16 @@ export function ExtractionRecordsPage({ onCreateExtraction }: ExtractionRecordsP
       setIsLoading(true);
       setError("");
       try {
-        const contractList = await listContracts(undefined, 1, 100);
+        const contractList = await listContracts(undefined, recordsPage, RECORDS_PAGE_SIZE);
         const payload = contractList.items.map(contractBriefToExtractionRecordSummary);
+        const totalPages = Math.max(1, Math.ceil(contractList.total / RECORDS_PAGE_SIZE));
+        if (recordsPage > totalPages) {
+          setRecordsPage(totalPages);
+          return;
+        }
         if (isCurrent) {
           setRecords(payload);
+          setRecordsTotal(contractList.total);
         }
       } catch (err) {
         if (isCurrent) {
@@ -57,7 +67,16 @@ export function ExtractionRecordsPage({ onCreateExtraction }: ExtractionRecordsP
     return () => {
       isCurrent = false;
     };
-  }, []);
+  }, [recordsPage]);
+
+  function handleRecordsPageChange(page: number) {
+    setRecordsPage(page);
+    setSelectedTaskId("");
+    setSelectedTask(null);
+    setReviewRecords([]);
+    setEditingResultId(null);
+    setHistoryOpen(false);
+  }
 
   async function openTask(taskId: string) {
     setSelectedTaskId(taskId);
@@ -173,6 +192,12 @@ export function ExtractionRecordsPage({ onCreateExtraction }: ExtractionRecordsP
                   </div>
                 </article>
               ))}
+              <PaginationControls
+                page={recordsPage}
+                pageSize={RECORDS_PAGE_SIZE}
+                total={recordsTotal}
+                onPageChange={handleRecordsPageChange}
+              />
             </div>
           )}
         </div>

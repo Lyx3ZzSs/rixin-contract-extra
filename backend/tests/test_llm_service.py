@@ -178,6 +178,16 @@ class TestDynamicPrompt:
         assert "source_text 必须是合同原文片段" in prompt
         assert "甲方/乙方/当事人优先查合同首部和签章区" in prompt
 
+    def test_prompt_requires_source_bbox_for_trace_highlight(self):
+        prompt = _build_dynamic_prompt(
+            [FieldSpec(field_key="party-a-name", field_name="甲方名称")],
+            "甲方：测试公司",
+        )
+
+        assert "source_bbox" in prompt
+        assert "[x1, y1, x2, y2]" in prompt
+        assert "不能可靠定位" in prompt
+
     def test_qwen_requires_field_definitions(self):
         provider = QwenLLMProvider()
 
