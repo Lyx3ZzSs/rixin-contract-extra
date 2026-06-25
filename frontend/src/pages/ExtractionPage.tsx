@@ -1151,7 +1151,11 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
                               </small>
                             )}
                             {fieldViolations.length > 0 && (() => {
-                              const topSeverity = activeFieldViolations[0]?.severity ?? fieldViolations[0].severity;
+                              const topSeverity = activeFieldViolations.length > 0
+                                ? (activeFieldViolations.some(v => v.severity === 'error') ? 'error'
+                                  : activeFieldViolations.some(v => v.severity === 'warning') ? 'warning'
+                                  : activeFieldViolations[0].severity)
+                                : (fieldViolations[0]?.severity ?? 'info');
                               return (
                                 <button
                                   type="button"

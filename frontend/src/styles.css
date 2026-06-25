@@ -5169,3 +5169,11 @@ h2 {
   }
 }
 
+/* ── Task 3: ErrorBoundary fallback ── */
+
+.error-boundary-fallback { display: flex; align-items: center; justify-content: center; min-height: 300px; padding: 24px; text-align: center; }
+.error-boundary-content { max-width: 480px; }
+.error-boundary-content h2 { font-size: 18px; color: var(--text); margin: 0 0 8px; }
+.error-boundary-content p { color: var(--muted); margin: 0 0 16px; }
+.error-boundary-refresh { padding: 8px 16px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); cursor: pointer; }
+.error-boundary-refresh:hover { border-color: var(--teal); }
