@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import uuid
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.extraction.base import (
@@ -54,13 +54,24 @@ def _field_summary(field: ExtractedFieldData) -> dict[str, object]:
 # Load field definitions from DB
 # ---------------------------------------------------------------------------
 
-async def load_field_definitions(db: AsyncSession) -> list[FieldDefinition]:
-    """Load all active field definitions from DB, ordered by sort_order."""
-    result = await db.execute(
-        select(FieldDefinition)
-        .where(FieldDefinition.is_active == True)
-        .order_by(FieldDefinition.sort_order, FieldDefinition.field_key)
-    )
+async def load_field_definitions(
+    db: AsyncSession, contract_type: str | None = None,
+) -> list[FieldDefinition]:
+    """Load active field definitions, optionally filtered by contract type.
+
+    With contract_type: returns 通用 (NULL) + that type's专属 fields.
+    Without: returns all active fields (legacy behaviour).
+    """
+    stmt = select(FieldDefinition).where(FieldDefinition.is_active == True)
+    if contract_type:
+        stmt = stmt.where(
+            or_(
+                FieldDefinition.contract_type.is_(None),
+                FieldDefinition.contract_type == contract_type,
+            )
+        )
+    stmt = stmt.order_by(FieldDefinition.sort_order, FieldDefinition.field_key)
+    result = await db.execute(stmt)
     return list(result.scalars().all())
 
 
