@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.database import Base
@@ -27,7 +28,23 @@ settings.llm_provider = "mock"
 _tmp_db = Path(tempfile.mkdtemp(prefix="ctest_db_")) / "test.db"
 TEST_DATABASE_URL = f"sqlite+aiosqlite:///{_tmp_db}"
 
-test_engine = create_async_engine(TEST_DATABASE_URL, echo=False)
+# connect_args: allow concurrent writers (e.g. dual-track pipeline gather) to
+# serialize via a busy timeout rather than failing with "database is locked".
+# WAL mode permits a writer to proceed alongside readers/other committed state.
+test_engine = create_async_engine(
+    TEST_DATABASE_URL, echo=False,
+    connect_args={"timeout": 30, "check_same_thread": False},
+)
+
+
+@event.listens_for(test_engine.sync_engine, "connect")
+def _set_sqlite_pragma(dbapi_conn, _record):
+    cur = dbapi_conn.cursor()
+    cur.execute("PRAGMA journal_mode=WAL")
+    cur.execute("PRAGMA busy_timeout=30000")
+    cur.close()
+
+
 test_session_factory = async_sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
 
 
