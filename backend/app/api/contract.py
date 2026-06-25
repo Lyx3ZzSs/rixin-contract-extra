@@ -45,6 +45,7 @@ async def _load_contract_detail(db: AsyncSession, contract_id: uuid.UUID) -> Con
             selectinload(Contract.files),
             selectinload(Contract.fields),
             selectinload(Contract.clauses),
+            selectinload(Contract.violations),
         )
         .where(Contract.id == contract_id)
     )

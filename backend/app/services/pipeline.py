@@ -227,19 +227,85 @@ async def _run_extraction_pipeline_inner(
             if ocr_result is None or not ocr_result.full_text.strip():
                 raise ValueError("OCR result is not ready")
 
-            from app.services.extraction_service import extract_and_save
-            # Feed page-marked, table-structured markdown (not flat text) so the
-            # LLM sees table structure and chunking can split on page markers.
-            extraction = await extract_and_save(
-                db,
-                contract_id,
-                ocr_result.to_markdown(),
-                field_definitions=field_definitions,
+            from app.config import settings
+            from app.services.extraction_service import (
+                extract_and_save, load_field_definitions,
             )
-            await _raise_if_cancelled(db, task_id)
-            if extraction.contract_type:
-                contract.contract_type = extraction.contract_type
-                contract.contract_type_confidence = extraction.contract_type_confidence
+            from app.services.llm_service import LLMService
+            from app.services.violation_service import save_violations
+            from app.services import rule_validation_service
+            import asyncio
+
+            # --- Field set: user override (task payload) OR classify-driven ---
+            field_specs = field_definitions
+            classified_type: str | None = None
+            classified_conf: float | None = None
+            if field_specs is None:
+                classified_type, classified_conf = await LLMService.classify_contract_type(
+                    ocr_result.full_text,
+                )
+                ctype_for_fields = (
+                    classified_type
+                    if classified_type and classified_type != "unknown"
+                    else None
+                )
+                db_fields = await load_field_definitions(db, contract_type=ctype_for_fields)
+                field_specs = [
+                    FieldSpec(
+                        field_key=f.field_key, field_name=f.field_name,
+                        description=f.description, value_type=f.value_type,
+                    )
+                    for f in db_fields
+                ]
+
+            async def _track_a() -> None:
+                # Track A uses the outer ``db`` (main writer: extraction + type).
+                extraction = await extract_and_save(
+                    db, contract_id, ocr_result.to_markdown(),
+                    field_definitions=field_specs,
+                )
+                await _raise_if_cancelled(db, task_id)
+                # Authoritative contract type: classify result if we ran it, else inline.
+                if classified_type and classified_type != "unknown":
+                    contract.contract_type = classified_type
+                    contract.contract_type_confidence = classified_conf
+                elif extraction.contract_type:
+                    contract.contract_type = extraction.contract_type
+                    contract.contract_type_confidence = extraction.contract_type_confidence
+
+                # Rule validation (non-fatal): persist violations for review.
+                if settings.enable_rule_validation:
+                    try:
+                        vr = rule_validation_service.validate_contract(
+                            extraction.fields,
+                            contract_type=contract.contract_type,
+                        )
+                        await save_violations(db, contract_id, vr)
+                    except Exception:
+                        logger.warning(
+                            "Rule validation failed for contract %s",
+                            contract_id, exc_info=True,
+                        )
+                # Commit Track A's writes so the concurrent Track B writer
+                # (separate session) does not block on this session's lock.
+                await db.commit()
+
+            async def _track_b() -> None:
+                # Track B: separate session (concurrent writer to clauses, WAL-safe).
+                if not settings.enable_clause_split:
+                    return
+                from app.services.clause_service import split_and_save_clauses
+                try:
+                    async with session_factory() as db2:
+                        await split_and_save_clauses(db2, contract_id, ocr_result)
+                        await db2.commit()
+                except Exception:
+                    logger.warning(
+                        "Clause split failed for contract %s",
+                        contract_id, exc_info=True,
+                    )
+
+            await asyncio.gather(_track_a(), _track_b())
 
             now = utc_now()
             contract.extraction_completed_at = now

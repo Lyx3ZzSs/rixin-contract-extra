@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     # CORS: comma-separated allowed origins. Empty = allow any (credentials off).
     allowed_origins: str = ""
 
+    # Phase 2 kill-switches: gate rule validation and clause splitting in the
+    # extraction pipeline (default on; set False to disable for rollout/rollback).
+    enable_rule_validation: bool = True
+    enable_clause_split: bool = True
+
     model_config = {
         "env_file": (
             # Resolve .env relative to the backend dir (parent of app/),

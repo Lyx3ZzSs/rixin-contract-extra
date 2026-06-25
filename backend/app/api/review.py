@@ -12,6 +12,7 @@ Key endpoints:
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -22,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.contract import ContractClause, ExtractedField
 from app.models.review import ReviewRecord
-from app.schemas.contract import ClauseDetail, FieldDetail
+from app.schemas.contract import ClauseDetail, FieldDetail, RuleViolationDetail
 from app.schemas.review import (
     BatchReviewRequest,
     ContractReviewRequest,
@@ -34,6 +35,8 @@ from app.schemas.review import (
 )
 
 router = APIRouter(prefix="/contracts/{contract_id}", tags=["review"])
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +254,15 @@ async def review_field(
         reviewer_id=reviewer_id,
     )
     db.add(record)
+
+    # Phase 2: a value correction can resolve/introduce rule violations — recompute.
+    if body.action == "modify":
+        from app.services.violation_service import recompute_violations
+        try:
+            await recompute_violations(db, contract_id)
+        except Exception:
+            logger.warning("violation recompute failed for %s", contract_id, exc_info=True)
+
     await db.flush()
 
     return FieldDetail.model_validate(field)
@@ -356,3 +368,51 @@ async def batch_review(
 
     await db.flush()
     return [ReviewRecordOut.model_validate(r) for r in records]
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: PATCH /violations/{violation_id} — ignore / restore a rule violation
+# ---------------------------------------------------------------------------
+
+@router.patch("/violations/{violation_id}", response_model=RuleViolationDetail)
+async def review_violation(
+    contract_id: uuid.UUID,
+    violation_id: uuid.UUID,
+    body: ReviewAction,
+    reviewer_id: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Ignore / un-ignore a rule violation. action=approve → ignored; reject → active."""
+    from app.models.rule_violation import RuleViolation
+
+    result = await db.execute(
+        select(RuleViolation).where(
+            RuleViolation.id == violation_id,
+            RuleViolation.contract_id == contract_id,
+        )
+    )
+    violation = result.scalar_one_or_none()
+    if not violation:
+        raise HTTPException(404, "Violation not found")
+
+    if body.action == "approve":
+        violation.status = "ignored"
+        violation.ignored_at = datetime.now(timezone.utc)
+        violation.ignored_by = reviewer_id
+    elif body.action == "reject":
+        violation.status = "active"
+        violation.ignored_at = None
+        violation.ignored_by = None
+    else:
+        raise HTTPException(400, "Use action=approve (ignore) or reject (restore)")
+
+    db.add(ReviewRecord(
+        contract_id=contract_id,
+        target_type="violation",
+        target_id=violation_id,
+        action=body.action,
+        comment=body.comment,
+        reviewer_id=reviewer_id,
+    ))
+    await db.flush()
+    return RuleViolationDetail.model_validate(violation)

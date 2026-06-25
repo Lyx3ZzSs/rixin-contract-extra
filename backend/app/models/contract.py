@@ -53,6 +53,9 @@ class Contract(Base):
     review_records: Mapped[list["ReviewRecord"]] = relationship(
         back_populates="contract", cascade="all, delete-orphan",
     )
+    violations: Mapped[list["RuleViolation"]] = relationship(
+        back_populates="contract", cascade="all, delete-orphan",
+    )
 
 
 # ---------------------------------------------------------------------------

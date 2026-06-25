@@ -89,6 +89,21 @@ class ClauseDetail(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class RuleViolationDetail(BaseModel):
+    id: uuid.UUID
+    field_key: str | None
+    rule_key: str
+    severity: str
+    message: str
+    status: str
+    detail: dict | None
+    created_at: datetime
+    ignored_at: datetime | None
+    ignored_by: str | None
+
+    model_config = {"from_attributes": True}
+
+
 class ContractDetail(BaseModel):
     id: uuid.UUID
     title: str | None
@@ -104,5 +119,6 @@ class ContractDetail(BaseModel):
     files: list[FileBrief] = []
     fields: list[FieldDetail] = []
     clauses: list[ClauseDetail] = []
+    violations: list[RuleViolationDetail] = []
 
     model_config = {"from_attributes": True}
