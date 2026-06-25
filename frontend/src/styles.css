@@ -1524,6 +1524,15 @@ h2 {
   box-shadow: 0 2px 8px rgba(32, 66, 70, 0.05);
 }
 
+/* T2 traceability: cards with a resolvable bbox act as highlight triggers. */
+.extract-card-item.clickable {
+  cursor: pointer;
+}
+.extract-card-item.clickable:focus-visible {
+  outline: 2px solid var(--accent, #2d6a6f);
+  outline-offset: 2px;
+}
+
 .extract-card-name {
   flex: 0 0 112px;
   min-width: 0;

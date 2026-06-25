@@ -1,4 +1,4 @@
-import { forwardRef, type ChangeEvent, type UIEvent, useCallback, useEffect, useRef, useState } from "react";
+import { forwardRef, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type UIEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from "lucide-react";
 import * as pdfjsLib from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
@@ -23,7 +23,14 @@ import {
 import { fieldDetailToExtractionFieldValue } from "../types";
 import { readExtractionFieldLibrary } from "../lib/extractionFieldLibrary";
 import { reviewStatusLabel } from "../lib/reviewStatus";
-import type { ExtractionFieldValue, FieldDetail, UploadResponse } from "../types";
+import type {
+  BBox,
+  ContractDetail,
+  ExtractionFieldValue,
+  FieldDetail,
+  UploadResponse,
+} from "../types";
+import { PageImagePreview, type HighlightTarget } from "../components/PageImagePreview";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -51,6 +58,10 @@ interface BatchFileItem {
   extractionStatus: BatchStatus;
   extractionStage: string;
   results: ExtractionFieldValue[] | null;
+  /** Latest ContractDetail for this contract (page_count + per-field bbox). Threaded
+   *  from getContractDetail at extraction-completion and batch-review-refresh so the
+   *  result-view preview + field-click highlight have a bbox/page source. */
+  contractDetail?: ContractDetail | null;
   error: string;
 }
 
@@ -198,6 +209,8 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
   const [isExtracting, setIsExtracting] = useState(false);
   const [extractionError, setExtractionError] = useState("");
   const [expandedResultKeys, setExpandedResultKeys] = useState<Set<string>>(() => new Set());
+  // T2 traceability: target page+bbox driven by field-card clicks; consumed by PageImagePreview.
+  const [highlightTarget, setHighlightTarget] = useState<HighlightTarget | null>(null);
   const [currentStep, setCurrentStep] = useState<1 | 2 | 3>(2);
   const batchRunIdRef = useRef(0);
   const ocrSyncPromiseByItemRef = useRef(new Map<string, Promise<void>>());
@@ -349,7 +362,7 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
       );
       const detail = await getContractDetail(activeItem.upload.contract_id);
       const nextResults = buildFieldValues(fields, detail.fields);
-      updateItem(activeItem.id, { results: nextResults });
+      updateItem(activeItem.id, { results: nextResults, contractDetail: detail });
       setSelectedReviewKeys(new Set());
     } catch (err) {
       console.error("batch review failed", err);
@@ -546,6 +559,7 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
         extractionStatus: "completed",
         extractionStage: "completed",
         results: buildFieldValues(selectedFields, detail.fields),
+        contractDetail: detail,
         error: "",
       });
     } catch (err) {
@@ -733,6 +747,19 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
 
   const activeFieldCount = fields.length;
   const results = activeItem?.results ?? null;
+  // ContractDetail for the active item — source of page_count + per-field bbox for the
+  // T2 image preview and field-click highlight. Threaded from getContractDetail at
+  // extraction-completion / batch-review-refresh (see extractSingleBatchItem / runBatchReview).
+  const activeContractDetail = activeItem?.contractDetail ?? null;
+  // Map field_id → bbox so a clicked result card (which carries field_id but no bbox) can
+  // resolve its highlight target in O(1) without re-scanning the detail on every click.
+  const fieldBBoxById = useMemo(() => {
+    const map = new Map<string, BBox>();
+    for (const f of activeContractDetail?.fields ?? []) {
+      if (f.bbox) map.set(f.id, f.bbox);
+    }
+    return map;
+  }, [activeContractDetail]);
   const hasBatchResults = items.some((item) =>
     item.extractionStatus === "completed" || item.extractionStatus === "failed" || item.extractionStatus === "skipped",
   );
@@ -826,7 +853,18 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
             <div className="extract-document-page">
               {!activeItem || !activeFile ? (
                 <DocumentFallback file={initialItems[0].file} message="请选择合同文件" />
+              ) : activeItem.upload?.contract_id ? (
+                // T2 OCR traceability preview: per-page OCR images + bbox highlight.
+                // Primary preview once the contract exists (server rasterizes PDFs to
+                // page images). pageCount defaults to 1 until ContractDetail lands.
+                <PageImagePreview
+                  contractId={activeItem.upload.contract_id}
+                  pageCount={activeContractDetail?.page_count ?? 1}
+                  target={highlightTarget}
+                />
               ) : isPdf ? (
+                // Pre-contract fallback: PDF uploaded but not yet processed/rasterized —
+                // render directly via pdfjs until a contract_id is available.
                 <FlatPdfPreview src={activeItem.documentUrl} file={activeFile} />
               ) : (
                 <DocumentFallback file={activeFile} />
@@ -899,10 +937,43 @@ function ExtractionFieldSetup({ initialItems, onBack }: ExtractionFieldSetupProp
                       const canExpand = r.status === "found" && isLongExtractionValue(valueText);
                       const isLowConfidence =
                         r.confidence != null && r.confidence < LOW_CONFIDENCE_THRESHOLD;
+                      // T2 highlight: resolve bbox from the active ContractDetail (the UI
+                      // ExtractionFieldValue carries no bbox). Clickable only when we have
+                      // both a page_no and a bbox, and the card isn't in review-edit mode.
+                      const cardBBox = r.field_id ? fieldBBoxById.get(r.field_id) ?? null : null;
+                      const isReviewingThis = reviewingFieldKey === r.field_key;
+                      const canHighlight =
+                        !isReviewingThis && !batchBusy && r.page_no != null && cardBBox != null;
+                      const handleCardHighlight = (e?: ReactMouseEvent | ReactKeyboardEvent) => {
+                        if (!canHighlight || r.page_no == null || !cardBBox) return;
+                        // Ignore clicks that originate from interactive children (checkbox,
+                        // 修正/展开/保存 buttons) so those keep their own behavior.
+                        if (e && "target" in e) {
+                          const t = e.target as HTMLElement;
+                          if (t.closest("button, input, a, [role=button]")) return;
+                        }
+                        setHighlightTarget({ pageNo: r.page_no, bbox: cardBBox });
+                      };
                       return (
                         <div
-                          className={`extract-card-item result${isLowConfidence ? " low-confidence" : ""}`}
+                          className={`extract-card-item result${isLowConfidence ? " low-confidence" : ""}${canHighlight ? " clickable" : ""}`}
                           key={resultKey}
+                          onClick={canHighlight ? handleCardHighlight : undefined}
+                          onKeyDown={
+                            canHighlight
+                              ? (e) => {
+                                  if (e.key === "Enter" || e.key === " ") {
+                                    e.preventDefault();
+                                    handleCardHighlight(e);
+                                  }
+                                }
+                              : undefined
+                          }
+                          role={canHighlight ? "button" : undefined}
+                          tabIndex={canHighlight ? 0 : undefined}
+                          aria-label={
+                            canHighlight ? `高亮第 ${r.page_no} 页原文位置` : undefined
+                          }
                         >
                           <span className="extract-card-name">
                             <input
