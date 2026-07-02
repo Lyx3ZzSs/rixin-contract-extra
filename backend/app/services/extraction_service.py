@@ -30,6 +30,23 @@ logger = logging.getLogger(__name__)
 _SUBJECT_FIELD_KEYS = {"party-a-name", "party-b-name"}
 _LOG_SNIPPET_LIMIT = 200
 
+# --- bbox backfill matching tuning -----------------------------------------
+# Scanned PDFs (PP-StructureV3) produce layout blocks that align with the
+# paragraphs the LLM sees, so source_text lands in a single block. Text-based
+# PDFs (PyMuPDF get_text("dict")) split a clause across several blocks or pack
+# several clauses into one, so a pure substring match frequently lands on the
+# wrong block and the highlight drifts. We therefore score every candidate
+# block by character-bigram overlap and, when no single block clears the bar,
+# try merging adjacent blocks (same page, near-contiguous sort_order) into a
+# single bbox union.
+_TOKEN_THRESHOLD = 0.85   # single-block pass mark (high: a fragment of a long
+                           # clause must NOT pass, so it routes to the merge path)
+_MERGE_THRESHOLD = 0.70   # merged-window pass mark (source coverage by union)
+_TOP_K_FOR_MERGE = 3      # anchors to try window expansion on
+_MAX_MERGE_SPAN = 4       # max blocks in one merge window
+_SOURCE_MIN_LEN = 6       # skip very short source_text (unreliable to score)
+_SORT_ORDER_GAP = 2       # max sort_order jump still considered adjacent
+
 
 def _truncate_for_log(text: str | None, limit: int = _LOG_SNIPPET_LIMIT) -> str | None:
     if text is None:
@@ -70,6 +87,95 @@ def _bbox_from_stored(value: object) -> BBox | None:
         return None
 
 
+def _char_bigrams(text: str) -> frozenset[str]:
+    """Character 2-grams over the normalized text.
+
+    Stable for mixed CJK/Latin/digit text without any tokenization dependency.
+    For single-character input returns that character alone so coverage math
+    still works; for empty input returns an empty set.
+    """
+    if not text:
+        return frozenset()
+    if len(text) < 2:
+        return frozenset({text})
+    return frozenset(text[i:i + 2] for i in range(len(text) - 1))
+
+
+def _containment(haystack: frozenset[str], needle: frozenset[str]) -> float:
+    """Fraction of ``needle``'s bigrams present in ``haystack``."""
+    if not needle:
+        return 0.0
+    return len(needle & haystack) / len(needle)
+
+
+def _score_block(
+    source_grams: frozenset[str], block_grams: frozenset[str],
+) -> float:
+    """How well a single block covers the source text, in [0, 1].
+
+    The directional coverage ``containment(block ⊇ source)`` (what fraction of
+    the source's bigrams live in this block) is the meaningful signal for a
+    single-block hit: a block that fully contains the clause scores ~1.0, while
+    a block that is merely a *fragment* of the clause scores low (it only
+    covers part of the source). The reverse direction (block ⊆ source) is NOT
+    rewarded here on purpose — a tiny fragment of a long clause is exactly the
+    case we want to route into the merge path, not the single-block path.
+
+    ``jac`` adds exactness so a coincidentally-overlapping unrelated block
+    cannot clear the threshold. The 0.7/0.3 blend lets an exact hit clear
+    ``_TOKEN_THRESHOLD`` without special-casing, keeping the scanned-PDF fast
+    path identical in behaviour to the old substring match.
+    """
+    if not source_grams or not block_grams:
+        return 0.0
+    cont = _containment(block_grams, source_grams)
+    inter = len(source_grams & block_grams)
+    union = len(source_grams | block_grams)
+    jac = inter / union if union else 0.0
+    return cont * 0.7 + jac * 0.3
+
+
+def _window_coverage(
+    source_grams: frozenset[str], window_grams: frozenset[str],
+) -> float:
+    """How well a merged window covers the source text, in [0, 1].
+
+    For merged windows we use pure source coverage (no jaccard): the window is
+    built from several blocks so its bigram set can legitimately be a superset
+    of the source, and we only care that the whole clause is spanned.
+    """
+    if not source_grams or not window_grams:
+        return 0.0
+    return _containment(window_grams, source_grams)
+
+
+def _sort_order_contiguous(rows: list, indices: list[int]) -> bool:
+    """True iff every consecutive pair in ``indices`` has a sort_order jump
+    no larger than ``_SORT_ORDER_GAP``.
+
+    Guards against merging blocks that are far apart on the page (different
+    column / different section), which is the main source of false merges.
+    """
+    ordered = sorted(indices)
+    for a, b in zip(ordered, ordered[1:]):
+        if abs(rows[b].sort_order - rows[a].sort_order) > _SORT_ORDER_GAP:
+            return False
+    return True
+
+
+def _union_bbox(bboxes: list[BBox | None]) -> BBox | None:
+    """Axis-aligned union of bboxes, ignoring None entries."""
+    present = [b for b in bboxes if b is not None]
+    if not present:
+        return None
+    return BBox(
+        x1=min(b.x1 for b in present),
+        y1=min(b.y1 for b in present),
+        x2=max(b.x2 for b in present),
+        y2=max(b.y2 for b in present),
+    )
+
+
 async def _attach_source_bboxes(
     db: AsyncSession,
     contract_id: uuid.UUID,
@@ -104,25 +210,74 @@ async def _attach_source_bboxes(
     if not rows:
         return
 
+    # Pre-group by page and pre-compute normalized text + bigrams per row so the
+    # per-field loop only does set arithmetic, not re-normalization.
+    rows_by_page: dict[int, list] = {}
+    row_grams: dict[int, frozenset[str]] = {}
+    for row in rows:
+        rows_by_page.setdefault(row.page_no, []).append(row)
+        row_grams[id(row)] = _char_bigrams(_normalize_match_text(row.text))
+
     for field in unresolved:
         source = _normalize_match_text(field.source_text)
-        if not source:
+        if len(source) < _SOURCE_MIN_LEN:
             continue
-        candidates = rows
-        if field.page_no is not None:
-            candidates = [row for row in rows if row.page_no == field.page_no]
-        for row in candidates:
-            block_text = _normalize_match_text(row.text)
-            if not block_text:
-                continue
-            if source in block_text or block_text in source:
-                bbox = _bbox_from_stored(row.bbox)
-                if bbox is None:
-                    continue
+        source_grams = _char_bigrams(source)
+        candidates = (
+            rows_by_page.get(field.page_no, []) if field.page_no is not None else rows
+        )
+
+        # Score every candidate block. Scanned-PDF layout blocks contain the
+        # whole clause, so the best score clears _TOKEN_THRESHOLD here and we
+        # never enter the merge path.
+        scored: list[tuple[float, int]] = []
+        best_score = 0.0
+        best_idx = -1
+        for idx, row in enumerate(candidates):
+            score = _score_block(source_grams, row_grams[id(row)])
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+            if score > 0.0:
+                scored.append((score, idx))
+
+        if best_idx >= 0 and best_score >= _TOKEN_THRESHOLD:
+            bbox = _bbox_from_stored(candidates[best_idx].bbox)
+            if bbox is not None:
                 field.bbox = bbox
                 if field.page_no is None:
-                    field.page_no = row.page_no
+                    field.page_no = candidates[best_idx].page_no
+                continue
+
+        # No single block cleared the bar — text-based PDFs often split a
+        # clause across consecutive blocks. Try expanding windows around the
+        # top-scoring anchors. Requires a known page (merge needs same-page
+        # adjacency).
+        if field.page_no is None or not scored:
+            continue
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        merged = False
+        for _, anchor_idx in scored[:_TOP_K_FOR_MERGE]:
+            if merged:
                 break
+            for span in range(2, _MAX_MERGE_SPAN + 1):
+                window_idx = list(range(anchor_idx, anchor_idx + span))
+                if window_idx[-1] >= len(candidates):
+                    break
+                if not _sort_order_contiguous(candidates, window_idx):
+                    break
+                window_text = "".join(
+                    _normalize_match_text(candidates[i].text) for i in window_idx
+                )
+                if _window_coverage(source_grams, _char_bigrams(window_text)) >= _MERGE_THRESHOLD:
+                    bbox = _union_bbox(
+                        [_bbox_from_stored(candidates[i].bbox) for i in window_idx]
+                    )
+                    if bbox is not None:
+                        field.bbox = bbox
+                        merged = True
+                        break
+        # If still unresolved, field.bbox stays None (front-end shows page-only).
 
 
 # ---------------------------------------------------------------------------
