@@ -171,15 +171,14 @@ def test_ocr_log_truncate_helper_limits_text():
 
 
 @pytest.mark.asyncio
-async def test_ocr_service_persists_page_images_for_scanned_pdf(sample_pdf_content, tmp_upload_dir, monkeypatch):
-    """Scanned PDFs must rasterize and persist page images before image OCR."""
+async def test_ocr_service_persists_page_images(sample_pdf_content, tmp_upload_dir, monkeypatch):
+    """All PDFs (text-based and scanned) must rasterize and persist page images
+    before image OCR, so the bbox lives in the same pixel space as the preview."""
     from tests.conftest import test_session_factory
     from app.services import ocr_service
     from app.services.file_service import save_file, page_image_path
     from app.services.contract_service import create_contract
     from app.models.contract import ContractFile
-
-    monkeypatch.setattr(ocr_service.OCRService, "_is_text_pdf", classmethod(lambda cls, _fp, _ft: False))
 
     file_path, file_type, _size, content_hash = save_file(sample_pdf_content, "pages.pdf")
     async with test_session_factory() as db:
@@ -197,12 +196,14 @@ async def test_ocr_service_persists_page_images_for_scanned_pdf(sample_pdf_conte
 
 
 @pytest.mark.asyncio
-async def test_ocr_service_uses_text_pdf_path_when_text_layer_is_available(tmp_upload_dir, monkeypatch):
-    """Text PDFs should avoid image OCR and not block on preview rasterization."""
+async def test_ocr_service_uses_image_path_for_text_pdf(tmp_upload_dir, monkeypatch):
+    """Text-based PDFs must also go through local rasterization + extract_from_images
+    (not the whole-PDF extract_detailed path), so the bbox shares the page image's
+    pixel space. Page images are persisted synchronously, not in the background."""
     fitz = pytest.importorskip("fitz")
     from tests.conftest import test_session_factory
     from app.services import ocr_service
-    from app.services.file_service import save_file
+    from app.services.file_service import save_file, page_image_path
     from app.services.contract_service import create_contract
     from app.models.contract import ContractFile
     from app.models.ocr import OCRBlock
@@ -216,42 +217,33 @@ async def test_ocr_service_uses_text_pdf_path_when_text_layer_is_available(tmp_u
     file_path, file_type, file_size, content_hash = save_file(pdf_bytes, "text-layer.pdf")
     calls: list[str] = []
 
-    class TextPdfProvider:
+    # bbox in the 200DPI page-image pixel space (what a real image-OCR provider
+    # would return for our rasterized PNG). These values must be persisted
+    # verbatim — no DPI scaling applied.
+    expected_bbox = BBox(x1=100, y1=100, x2=500, y2=140)
+    expected_page_width = int(round(612 * (200 / 72.0)))  # A4-ish width in pt -> 200DPI px
+
+    class ImageOcrProvider:
         def extract_detailed(self, _file_path, _file_type):
             calls.append("extract_detailed")
-            return OCRDetailedResult(pages=[OCRPageResult(page_no=1, width=612, height=792, blocks=[
-                OCRTextBlock(
-                    block_type="text",
-                    text="甲方名称：北京日新科技有限公司\n乙方名称：上海恒信信息技术有限公司",
-                    bbox=BBox(x1=72, y1=72, x2=420, y2=110),
-                    confidence=1.0,
-                    sort_order=1,
-                ),
-            ])], provider="text-pdf")
+            raise AssertionError("whole-PDF path must not run for text PDFs anymore")
 
         def extract_from_images(self, _page_images):
             calls.append("extract_from_images")
-            raise AssertionError("image OCR should not run for text PDFs")
+            return OCRDetailedResult(pages=[OCRPageResult(
+                page_no=1,
+                width=expected_page_width,
+                height=round(792 * 200 / 72),
+                blocks=[OCRTextBlock(
+                    block_type="text",
+                    text="甲方名称：北京日新科技有限公司\n乙方名称：上海恒信信息技术有限公司",
+                    bbox=expected_bbox,
+                    confidence=1.0,
+                    sort_order=1,
+                )],
+            )], provider="image-ocr")
 
-    background_jobs: list[tuple[str, str]] = []
-
-    def fake_start_background_pages(_contract_id, bg_file_path, bg_file_type):
-        background_jobs.append((bg_file_path, bg_file_type))
-
-    def fail_sync_prepare(_file_path, _file_type):
-        raise AssertionError("text PDF OCR should not synchronously rasterize preview images")
-
-    monkeypatch.setattr(ocr_service, "get_ocr_provider", lambda: TextPdfProvider())
-    monkeypatch.setattr(
-        ocr_service.OCRService,
-        "_start_background_page_image_generation",
-        classmethod(lambda cls, contract_id, bg_file_path, bg_file_type: fake_start_background_pages(contract_id, bg_file_path, bg_file_type)),
-    )
-    monkeypatch.setattr(
-        ocr_service.OCRService,
-        "_prepare_page_images",
-        classmethod(lambda cls, prep_file_path, prep_file_type: fail_sync_prepare(prep_file_path, prep_file_type)),
-    )
+    monkeypatch.setattr(ocr_service, "get_ocr_provider", lambda: ImageOcrProvider())
 
     async with test_session_factory() as db:
         contract = await create_contract(db, content_hash=content_hash)
@@ -268,16 +260,22 @@ async def test_ocr_service_uses_text_pdf_path_when_text_layer_is_available(tmp_u
         await db.commit()
         contract_id = contract.id
 
-    assert calls == ["extract_detailed"]
-    assert background_jobs == [(file_path, file_type)]
+    # Image-OCR path taken, whole-PDF path not.
+    assert calls == ["extract_from_images"]
+    # Page image persisted synchronously (no background generation anymore).
+    assert page_image_path(contract_id, 1).exists()
 
     async with test_session_factory() as db:
         block = (await db.execute(select(OCRBlock).where(OCRBlock.contract_id == contract_id))).scalar_one()
 
-    assert block.page_width is not None
-    assert block.page_width > 612
+    # bbox persisted verbatim — NO 200/72 scaling applied (that was the bug).
     assert block.bbox is not None
-    assert block.bbox["x1"] > 72
+    assert block.bbox["x1"] == expected_bbox.x1
+    assert block.bbox["x2"] == expected_bbox.x2
+    assert block.bbox["y1"] == expected_bbox.y1
+    assert block.bbox["y2"] == expected_bbox.y2
+    # page_width matches the rasterized 200DPI image, not a DPI-scaled value.
+    assert block.page_width == expected_page_width
 
 
 @pytest.mark.asyncio

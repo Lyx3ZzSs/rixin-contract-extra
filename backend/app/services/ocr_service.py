@@ -33,7 +33,6 @@ logger = logging.getLogger(__name__)
 
 _SUBJECT_KEYWORDS = ("甲方名称", "乙方名称", "甲方", "乙方")
 _LOG_SNIPPET_LIMIT = 200
-_BACKGROUND_PAGE_IMAGE_TASKS: set[asyncio.Task] = set()
 
 
 def _truncate_for_log(text: str | None, limit: int = _LOG_SNIPPET_LIMIT) -> str | None:
@@ -70,36 +69,37 @@ class OCRService:
     ) -> OCRDetailedResult:
         """Run OCR and persist block-level results + page images.
 
-        Text PDFs are parsed through the provider's PDF-text path. Scanned PDFs
-        and image uploads use page-image OCR. We still persist page images for
-        preview/highlight traceability.
+        All PDFs (text-based and scanned) and image uploads are rasterized
+        locally first, then fed to the OCR provider as page images. This keeps
+        the OCR bbox in the SAME pixel space as the page image we persist and
+        the frontend displays, so the highlight overlay maps exactly via
+        ``displayedWidth / naturalWidth``.
+
+        (Previously text-based PDFs uploaded the whole PDF to the remote OCR
+        service, whose self-rasterized pixel space did not match our 200DPI page
+        images — the bbox was then force-scaled by a hardcoded 72DPI assumption,
+        causing highlight drift on text PDFs while scanned PDFs were correct.)
         """
         provider = get_ocr_provider()
 
-        # 1. Probe text layer before rasterizing. Text PDFs can finish OCR from
-        #    native text immediately; preview page images are generated in the
-        #    background so they do not block OCR completion.
-        is_text_pdf = cls._is_text_pdf(file_path, file_type)
-        if is_text_pdf:
-            result = await asyncio.to_thread(provider.extract_detailed, file_path, file_type)
-            cls._scale_pdf_text_result_to_dpi(result, settings.ppocr_pdf_dpi)
-            cls._start_background_page_image_generation(contract_id, file_path, file_type)
-        else:
-            # Scanned PDFs/images still need page images first because OCR bbox
-            # must live in the same pixel space as the preview/highlight image.
-            page_images = await asyncio.to_thread(cls._prepare_page_images, file_path, file_type)
-            if page_images:
-                await asyncio.to_thread(cls._persist_page_images, contract_id, page_images)
+        # 1. Rasterize locally so bbox lives in our known 200DPI pixel space.
+        page_images = await asyncio.to_thread(cls._prepare_page_images, file_path, file_type)
+        if page_images:
+            await asyncio.to_thread(cls._persist_page_images, contract_id, page_images)
 
-            if settings.ocr_rasterize_locally and page_images:
-                try:
-                    result = await asyncio.to_thread(
-                        provider.extract_from_images, [img.png_bytes for img in page_images],
-                    )
-                except NotImplementedError:
-                    result = await asyncio.to_thread(provider.extract_detailed, file_path, file_type)
-            else:
+        if settings.ocr_rasterize_locally and page_images:
+            try:
+                result = await asyncio.to_thread(
+                    provider.extract_from_images, [img.png_bytes for img in page_images],
+                )
+            except NotImplementedError:
+                # Provider cannot OCR pre-rasterized images (e.g. mock / ppocr);
+                # fall back to whole-file extraction. Coordinate-space alignment
+                # is best-effort on this path and only affects non-production
+                # providers.
                 result = await asyncio.to_thread(provider.extract_detailed, file_path, file_type)
+        else:
+            result = await asyncio.to_thread(provider.extract_detailed, file_path, file_type)
 
         if not result.full_text.strip():
             raise ValueError("OCR result is empty")
@@ -119,60 +119,12 @@ class OCRService:
             file_service.save_page_image(contract_id, img.page_no, img.png_bytes)
 
     @classmethod
-    def _generate_and_persist_page_images(
-        cls,
-        contract_id: uuid.UUID,
-        file_path: str,
-        file_type: str,
-    ) -> None:
-        page_images = cls._prepare_page_images(file_path, file_type)
-        if page_images:
-            cls._persist_page_images(contract_id, page_images)
-
-    @classmethod
-    async def _generate_and_persist_page_images_async(
-        cls,
-        contract_id: uuid.UUID,
-        file_path: str,
-        file_type: str,
-    ) -> None:
-        await asyncio.to_thread(cls._generate_and_persist_page_images, contract_id, file_path, file_type)
-
-    @classmethod
-    def _start_background_page_image_generation(
-        cls,
-        contract_id: uuid.UUID,
-        file_path: str,
-        file_type: str,
-    ) -> None:
-        if not settings.ocr_rasterize_locally:
-            return
-        task = asyncio.create_task(
-            cls._generate_and_persist_page_images_async(contract_id, file_path, file_type),
-        )
-        _BACKGROUND_PAGE_IMAGE_TASKS.add(task)
-
-        def _done(done_task: asyncio.Task) -> None:
-            _BACKGROUND_PAGE_IMAGE_TASKS.discard(done_task)
-            try:
-                done_task.result()
-            except Exception:
-                logger.warning(
-                    "Background page image generation failed: contract_id=%s file_path=%s",
-                    contract_id,
-                    file_path,
-                    exc_info=True,
-                )
-
-        task.add_done_callback(_done)
-
-    @classmethod
     def _prepare_page_images(cls, file_path: str, file_type: str) -> list[PageImage]:
         """Return page images for OCR + display.
 
-        PDFs are rasterized locally (known pixel space); image files are used
-        directly as a single page. Returns [] only when rasterization is off
-        AND the file is a PDF (legacy path will be used instead).
+        PDFs are rasterized locally (known 200DPI pixel space); image files are
+        used directly as a single page. Returns [] only when rasterization is
+        off AND the file is a PDF (legacy whole-file path will be used instead).
         """
         if not settings.ocr_rasterize_locally:
             return []
@@ -183,85 +135,6 @@ class OCRService:
         # assumes PNG input. Current contract uploads are PDFs, so this branch is
         # rarely hit in practice.
         return [PageImage(page_no=1, png_bytes=Path(file_path).read_bytes())]
-
-    @classmethod
-    def _is_text_pdf(cls, file_path: str, file_type: str) -> bool:
-        """Return True when a PDF has enough native text to avoid image OCR."""
-        if file_type.lower() != "pdf" and Path(file_path).suffix.lower() != ".pdf":
-            return False
-        try:
-            import fitz
-
-            doc = fitz.open(file_path)
-            try:
-                page_count = len(doc)
-                if page_count == 0:
-                    return False
-                text_len = 0
-                text_page_count = 0
-                for page in doc:
-                    text = page.get_text("text").strip()
-                    if text:
-                        text_page_count += 1
-                        text_len += len(text)
-                text_page_ratio = text_page_count / page_count
-                return (
-                    text_len >= settings.ppocr_pdf_text_min_chars
-                    and text_page_ratio >= settings.ppocr_pdf_text_page_ratio
-                )
-            finally:
-                doc.close()
-        except Exception:
-            logger.warning("PDF text-layer probe failed; falling back to image OCR", exc_info=True)
-            return False
-
-    @classmethod
-    def _scale_pdf_text_result_to_page_images(
-        cls,
-        result: OCRDetailedResult,
-        page_images: list[PageImage],
-    ) -> None:
-        """Scale PDF-point text bboxes into saved page-image pixel space."""
-        image_by_page = {img.page_no: img for img in page_images if img.width and img.height}
-        for page in result.pages:
-            image = image_by_page.get(page.page_no)
-            if not image or not page.width or not page.height:
-                continue
-            scale_x = image.width / page.width
-            scale_y = image.height / page.height
-            if scale_x <= 0 or scale_y <= 0:
-                continue
-            for block in page.blocks:
-                if not block.bbox:
-                    continue
-                block.bbox = BBox(
-                    x1=block.bbox.x1 * scale_x,
-                    y1=block.bbox.y1 * scale_y,
-                    x2=block.bbox.x2 * scale_x,
-                    y2=block.bbox.y2 * scale_y,
-                )
-            page.width = image.width
-            page.height = image.height
-
-    @classmethod
-    def _scale_pdf_text_result_to_dpi(cls, result: OCRDetailedResult, dpi: int) -> None:
-        """Scale PDF-point bboxes to the pixel space produced by rasterization."""
-        scale = dpi / 72.0
-        if scale <= 0:
-            return
-        for page in result.pages:
-            if page.width and page.height:
-                page.width = int(round(page.width * scale))
-                page.height = int(round(page.height * scale))
-            for block in page.blocks:
-                if not block.bbox:
-                    continue
-                block.bbox = BBox(
-                    x1=block.bbox.x1 * scale,
-                    y1=block.bbox.y1 * scale,
-                    x2=block.bbox.x2 * scale,
-                    y2=block.bbox.y2 * scale,
-                )
 
     @classmethod
     def _log_ocr_diagnostics(
