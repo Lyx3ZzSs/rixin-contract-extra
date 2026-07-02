@@ -30,8 +30,9 @@ class Settings(BaseSettings):
     # fall back to the legacy PDF-bytes path (provider.extract_detailed).
     ocr_rasterize_locally: bool = True
 
-    # LLM (Qwen3-30B-A3B, OpenAI-compatible)
-    llm_api_url: str = "http://10.10.10.245:8000/v1/chat/completions"
+    # LLM (Qwen3-30B-A3B, OpenAI-compatible). base_url should end at /v1 — the
+    # OpenAI SDK appends /chat/completions itself, so do NOT include it here.
+    llm_api_url: str = "http://10.10.10.245:8000/v1"
     llm_api_key: str = ""
     llm_model_name: str = "qwen3-30b-a3b"
     llm_max_tokens: int = 4096

@@ -24,6 +24,11 @@ settings.upload_dir = str(_tmp_upload)
 settings.ocr_provider = "mock"
 settings.llm_provider = "mock"
 
+# Tests hit the API without an API key, so force open mode regardless of what
+# .env sets for APP_API_KEYS. Tests that exercise auth (test_auth.py) override
+# this per-test via monkeypatch.
+settings.app_api_keys = ""
+
 # Use SQLite for tests
 _tmp_db = Path(tempfile.mkdtemp(prefix="ctest_db_")) / "test.db"
 TEST_DATABASE_URL = f"sqlite+aiosqlite:///{_tmp_db}"

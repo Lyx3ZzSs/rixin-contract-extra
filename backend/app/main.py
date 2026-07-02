@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +12,41 @@ from app.api.router import api_router
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+async def _run_alembic_upgrade(engine) -> None:
+    """Run ``alembic upgrade head`` against the configured database.
+
+    Uses the engine's URL so the in-process app and Alembic agree on the target
+    DB. Synchronous Alembic API is run in a worker thread.
+    """
+    import asyncio
+    from io import StringIO
+
+    from alembic import command
+    from alembic.config import Config as AlembicConfig
+    from sqlalchemy.engine import URL as DBURL
+
+    here = Path(__file__).resolve().parent.parent  # backend/
+    cfg = AlembicConfig(str(here / "alembic.ini"))
+    cfg.set_main_option("script_location", str(here / "alembic"))
+    url = str(engine.url)
+    # Escape % for configparser interpolation (passwords with URL-encoded chars).
+    if isinstance(engine.url, DBURL):
+        url = engine.url.render_as_string(hide_password=False)
+    cfg.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
+
+    buf = StringIO()
+    cfg.print_stdout = False
+
+    def _upgrade() -> None:
+        cfg.attributes["connection"] = None  # let Alembic open its own
+        command.upgrade(cfg, "head")
+
+    await asyncio.to_thread(_upgrade)
+    log_tail = buf.getvalue()
+    if log_tail:
+        logger.info("Alembic upgrade output:\n%s", log_tail)
 
 # Default field definitions for seeding
 _DEFAULT_FIELDS: list[dict] = [
@@ -44,10 +80,21 @@ _DEFAULT_FIELDS: list[dict] = [
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: create tables + seed default fields
-    from app.database import engine, Base
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # Startup: run Alembic migrations to the latest revision, then seed default
+    # fields. We intentionally do NOT use Base.metadata.create_all here: it would
+    # create all tables but leave alembic_version empty, so subsequent
+    # `alembic upgrade` runs would fail to reconcile. Migrations are the single
+    # source of truth for schema.
+    from app.database import engine
+    try:
+        await _run_alembic_upgrade(engine)
+    except Exception:
+        logging.getLogger(__name__).error(
+            "Alembic upgrade failed on startup — app will start but the schema "
+            "may be incomplete. Run `alembic upgrade head` manually.",
+            exc_info=True,
+        )
+
     # Seed default field definitions — incremental sync
     try:
         from app.database import async_session_factory
@@ -130,4 +177,9 @@ async def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8010, reload=True)
+    uvicorn.run(
+        "app.main:app",
+        host="0.0.0.0",
+        port=8010,
+        reload=settings.debug,
+    )
