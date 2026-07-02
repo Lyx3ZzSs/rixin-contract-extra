@@ -56,7 +56,11 @@ export function App() {
   }, [route]);
 
   if (!currentUser) {
-    return <LoginPage onLogin={handleLogin} />;
+    return (
+      <ErrorBoundary>
+        <LoginPage onLogin={handleLogin} />
+      </ErrorBoundary>
+    );
   }
 
   return (
